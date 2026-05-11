@@ -651,7 +651,7 @@ export function renderPaperclipWakePrompt(
         "<!-- PAPERCLIP_WAKE_PAYLOAD_START -->",
         "## Resume Delta",
         "",
-        "You are resuming an existing Paperclip session.",
+        "You are resuming an existing Standard Power session.",
         "This heartbeat is scoped to the issue below. Do not switch to another issue until you have handled this wake.",
         "Focus on the new wake delta below and continue the current task without restating the full heartbeat boilerplate.",
         "Fetch the API thread only when `fallbackFetchNeeded` is true or you need broader history than this batch.",
@@ -1364,7 +1364,7 @@ export async function listPaperclipSkillEntries(
         source: skillDir,
         required,
         requiredReason: required
-          ? "Bundled Paperclip skills are always available for local adapters."
+          ? "Bundled Standard Power skills are always available for local adapters."
           : null,
       };
     }));
@@ -1440,7 +1440,7 @@ export function buildPersistentSkillSnapshot(
 
   for (const desiredSkill of desiredSkills) {
     if (availableByKey.has(desiredSkill)) continue;
-    warnings.push(`Desired skill "${desiredSkill}" is not available from the Paperclip skills directory.`);
+    warnings.push(`Desired skill "${desiredSkill}" is not available from the Standard Power skills directory.`);
     entries.push({
       key: desiredSkill,
       runtimeName: null,
@@ -1715,7 +1715,7 @@ async function acquireMaterializeLock(lockDir: string): Promise<() => Promise<vo
       if (code !== "EEXIST") throw err;
       if (await removeStaleMaterializeLock(lockDir, MATERIALIZED_SKILL_LOCK_STALE_MS)) continue;
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for Paperclip skill materialization lock at ${lockDir}`);
+        throw new Error(`Timed out waiting for skill materialization lock at ${lockDir}`);
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -1924,7 +1924,7 @@ export async function runChildProcess(
 
     // Strip Claude Code nesting-guard env vars so spawned `claude` processes
     // don't refuse to start with "cannot be launched inside another session".
-    // These vars leak in when the Paperclip server itself is started from
+    // These vars leak in when the Standard Power server itself is started from
     // within a Claude Code session (e.g. `npx paperclipai run` in a terminal
     // owned by Claude Code) or when cron inherits a contaminated shell env.
     const CLAUDE_CODE_NESTING_VARS = [
