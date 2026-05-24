@@ -7941,6 +7941,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               model: readNonEmptyString(adapterResult.model) ?? "unknown",
               ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
               billingType: normalizeLedgerBillingType(adapterResult.billingType),
+              ...(adapterResult.usagePartial ? { usagePartial: true } : {}),
             } as Record<string, unknown>)
           : null;
 
