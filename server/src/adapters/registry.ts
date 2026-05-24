@@ -28,6 +28,7 @@ import {
   testEnvironment as claudeTestEnvironment,
   sessionCodec as claudeSessionCodec,
   getQuotaWindows as claudeGetQuotaWindows,
+  recoverPartialUsage as claudeRecoverPartialUsage,
 } from "@paperclipai/adapter-claude-local/server";
 import {
   agentConfigurationDoc as claudeAgentConfigurationDoc,
@@ -263,6 +264,7 @@ const claudeLocalAdapter: ServerAdapterModule = {
     buildNpmRuntimeCommandSpec(config, "claude", "@anthropic-ai/claude-code"),
   agentConfigurationDoc: claudeAgentConfigurationDoc,
   getQuotaWindows: claudeGetQuotaWindows,
+  recoverPartialUsage: claudeRecoverPartialUsage,
 };
 
 const acpxLocalAdapter: ServerAdapterModule = {

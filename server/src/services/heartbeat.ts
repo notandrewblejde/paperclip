@@ -6561,6 +6561,90 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
   }
 
+  // SPC-6119: when the heartbeat child is SIGKILL-ed before the adapter can
+  // emit a terminal result frame, the adapter's `execute()` never returns and
+  // the harness loses any usage already accrued (`usageJson: null`). Read the
+  // persisted ndjson, hand the stdout chunks to the adapter's
+  // `recoverPartialUsage` hook, and shape a billing-compatible `usageJson` so
+  // the failed run row still reflects the LLM cost incurred before the kill.
+  const RECOVER_PARTIAL_USAGE_MAX_BYTES = 50 * 1024 * 1024;
+
+  async function recoverPartialUsageJsonForOrphanedRun(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    adapterType: string;
+  }): Promise<Record<string, unknown> | null> {
+    const { run, adapterType } = input;
+    if (!run.logStore || !run.logRef) return null;
+
+    let adapter: ReturnType<typeof getServerAdapter>;
+    try {
+      adapter = getServerAdapter(adapterType);
+    } catch {
+      return null;
+    }
+    if (typeof adapter.recoverPartialUsage !== "function") return null;
+
+    let logContent: string;
+    try {
+      const result = await runLogStore.read(
+        { store: run.logStore as "local_file", logRef: run.logRef },
+        { offset: 0, limitBytes: RECOVER_PARTIAL_USAGE_MAX_BYTES },
+      );
+      logContent = result.content;
+    } catch {
+      return null;
+    }
+    if (!logContent) return null;
+
+    const stdoutChunks: string[] = [];
+    for (const rawLine of logContent.split(/\r?\n/)) {
+      if (!rawLine) continue;
+      try {
+        const parsedLine = JSON.parse(rawLine) as { stream?: unknown; chunk?: unknown };
+        if (parsedLine.stream === "stdout" && typeof parsedLine.chunk === "string") {
+          stdoutChunks.push(parsedLine.chunk);
+        }
+      } catch {
+        // Last line may be partially written when the child was SIGKILL-ed
+        // mid-append; skip it but keep processing recovered turns above.
+      }
+    }
+    if (stdoutChunks.length === 0) return null;
+
+    let recovered: ReturnType<NonNullable<typeof adapter.recoverPartialUsage>> | null;
+    try {
+      recovered = adapter.recoverPartialUsage(stdoutChunks.join(""));
+    } catch (err) {
+      logger.warn(
+        { err, runId: run.id, adapterType },
+        "recoverPartialUsage hook threw",
+      );
+      return null;
+    }
+    if (!recovered || !recovered.usage) return null;
+
+    const normalized = normalizeUsageTotals(recovered.usage);
+    if (!normalized) return null;
+    if (
+      normalized.inputTokens === 0 &&
+      normalized.outputTokens === 0 &&
+      normalized.cachedInputTokens === 0
+    ) {
+      return null;
+    }
+
+    return {
+      ...normalized,
+      rawInputTokens: normalized.inputTokens,
+      rawCachedInputTokens: normalized.cachedInputTokens,
+      rawOutputTokens: normalized.outputTokens,
+      usagePartial: true,
+      partialUsageMessages: recovered.partialUsageMessages,
+      usageSource: "process_lost_recovery",
+      ...(recovered.model ? { model: recovered.model } : {}),
+    };
+  }
+
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
@@ -6624,10 +6708,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const shouldRetry = tracksLocalChild && (!!run.processPid || !!run.processGroupId) && (run.processLossRetryCount ?? 0) < 1;
       const baseMessage = buildProcessLossMessage(run, descendantOnlyCleanup ? { descendantOnly: true } : undefined);
 
+      const recoveredUsageJson = await recoverPartialUsageJsonForOrphanedRun({
+        run,
+        adapterType,
+      });
+
       let finalizedRun = await setRunStatus(run.id, "failed", {
         error: shouldRetry ? `${baseMessage}; retrying once` : baseMessage,
         errorCode: "process_lost",
         finishedAt: now,
+        ...(recoveredUsageJson ? { usageJson: recoveredUsageJson } : {}),
         resultJson: mergeRunStopMetadataForAgent(
           { adapterType, adapterConfig },
           "failed",

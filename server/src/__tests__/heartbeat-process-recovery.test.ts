@@ -45,6 +45,16 @@ const mockAdapterExecute = vi.hoisted(() =>
     model: "test-model",
   })),
 );
+const mockRecoverPartialUsage = vi.hoisted(() =>
+  vi.fn<
+    [string],
+    {
+      usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
+      partialUsageMessages: number;
+      model?: string | null;
+    } | null
+  >(() => null),
+);
 
 vi.mock("../telemetry.ts", () => ({
   getTelemetryClient: () => mockTelemetryClient,
@@ -67,6 +77,7 @@ vi.mock("../adapters/index.ts", async () => {
     getServerAdapter: vi.fn(() => ({
       supportsLocalAgentJwt: false,
       execute: mockAdapterExecute,
+      recoverPartialUsage: mockRecoverPartialUsage,
     })),
   };
 });
@@ -75,6 +86,7 @@ import {
   heartbeatService,
   redactDetectedSuccessfulRunProgressSummaryForBoard,
 } from "../services/heartbeat.ts";
+import { getRunLogStore } from "../services/run-log-store.ts";
 import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
@@ -277,6 +289,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       provider: "test",
       model: "test-model",
     }));
+    mockRecoverPartialUsage.mockReset();
+    mockRecoverPartialUsage.mockReturnValue(null);
     runningProcesses.clear();
     for (const child of childProcesses) {
       child.kill("SIGKILL");
@@ -973,6 +987,116 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .then((rows) => rows[0] ?? null);
     expect(issue?.executionRunId).toBe(retryRun?.id ?? null);
     expect(issue?.checkoutRunId).toBe(runId);
+  });
+
+  it("flushes recovered partial usage to the failed run when the orphan log has streamed turns (SPC-6119)", async () => {
+    const { companyId, agentId, runId } = await seedRunFixture({
+      adapterType: "claude_local",
+      processPid: 999_999_999,
+    });
+
+    const store = getRunLogStore();
+    const handle = await store.begin({ companyId, agentId, runId });
+    const stdoutEvents = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "step 1" }],
+          usage: { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 50 },
+        },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "step 2" }],
+          usage: { input_tokens: 1100, output_tokens: 250, cache_read_input_tokens: 60 },
+        },
+      }),
+    ];
+    for (const event of stdoutEvents) {
+      await store.append(handle, {
+        stream: "stdout",
+        chunk: `${event}\n`,
+        ts: new Date().toISOString(),
+      });
+    }
+    await db
+      .update(heartbeatRuns)
+      .set({ logStore: handle.store, logRef: handle.logRef })
+      .where(eq(heartbeatRuns.id, runId));
+
+    mockRecoverPartialUsage.mockImplementation((stdout: string) => {
+      expect(stdout).toContain('"type":"assistant"');
+      expect(stdout).toContain('"input_tokens":1000');
+      expect(stdout).toContain('"input_tokens":1100');
+      return {
+        usage: { inputTokens: 2100, outputTokens: 450, cachedInputTokens: 110 },
+        partialUsageMessages: 2,
+        model: "claude-sonnet-4-6",
+      };
+    });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+
+    expect(mockRecoverPartialUsage).toHaveBeenCalledTimes(1);
+
+    const failedRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+    expect(failedRun?.usageJson).toMatchObject({
+      inputTokens: 2100,
+      outputTokens: 450,
+      cachedInputTokens: 110,
+      rawInputTokens: 2100,
+      rawCachedInputTokens: 110,
+      rawOutputTokens: 450,
+      usagePartial: true,
+      partialUsageMessages: 2,
+      usageSource: "process_lost_recovery",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  it("leaves usageJson null when the orphan child was SIGKILL-ed before any productive turn (SPC-6119)", async () => {
+    const { companyId, agentId, runId } = await seedRunFixture({
+      adapterType: "claude_local",
+      processPid: 999_999_999,
+    });
+
+    const store = getRunLogStore();
+    const handle = await store.begin({ companyId, agentId, runId });
+    await store.append(handle, {
+      stream: "stdout",
+      chunk: `${JSON.stringify({ type: "system", subtype: "init", session_id: "sess-1", model: "claude-sonnet-4-6" })}\n`,
+      ts: new Date().toISOString(),
+    });
+    await db
+      .update(heartbeatRuns)
+      .set({ logStore: handle.store, logRef: handle.logRef })
+      .where(eq(heartbeatRuns.id, runId));
+
+    mockRecoverPartialUsage.mockReturnValue({ usage: null, partialUsageMessages: 0, model: "claude-sonnet-4-6" });
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+    expect(result.reaped).toBe(1);
+
+    expect(mockRecoverPartialUsage).toHaveBeenCalledTimes(1);
+
+    const failedRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(failedRun?.status).toBe("failed");
+    expect(failedRun?.errorCode).toBe("process_lost");
+    expect(failedRun?.usageJson).toBeNull();
   });
 
   it("releases active environment leases when an orphaned run is reaped", async () => {
