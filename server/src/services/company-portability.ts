@@ -4535,7 +4535,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             variables: null,
             triggers: [],
           };
-          const createdRoutine = await routines.create(targetCompany.id, {
+          const { routine: createdRoutine } = await routines.create(targetCompany.id, {
             projectId,
             goalId: null,
             parentIssueId: null,

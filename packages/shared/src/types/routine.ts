@@ -59,6 +59,7 @@ export interface Routine {
   concurrencyPolicy: string;
   catchUpPolicy: string;
   variables: RoutineVariable[];
+  idempotencyKey: string | null;
   latestRevisionId: string | null;
   latestRevisionNumber: number;
   createdByAgentId: string | null;
