@@ -1503,7 +1503,29 @@ export function routineService(
       };
     },
 
-    create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<Routine> => {
+    create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<{ routine: Routine; idempotent: boolean }> => {
+      if (input.idempotencyKey) {
+        const assigneeCondition = input.assigneeAgentId
+          ? eq(routines.assigneeAgentId, input.assigneeAgentId)
+          : isNull(routines.assigneeAgentId);
+        const existing = await db
+          .select()
+          .from(routines)
+          .where(
+            and(
+              eq(routines.companyId, companyId),
+              assigneeCondition,
+              eq(routines.idempotencyKey, input.idempotencyKey),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+        if (existing) {
+          if (existing.status === "archived") {
+            throw conflict("A routine with this idempotencyKey already exists but is archived");
+          }
+          return { routine: existing, idempotent: true };
+        }
+      }
       await assertProject(companyId, input.projectId ?? null);
       await assertAssignableAgent(companyId, input.assigneeAgentId ?? null);
       if (input.goalId) await assertGoal(companyId, input.goalId);
@@ -1514,7 +1536,7 @@ export function routineService(
       );
       assertRoutineVariableDefinitions(variables);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
-      return db.transaction(async (tx) => {
+      const routine = await db.transaction(async (tx) => {
         const txDb = tx as unknown as Db;
         const [created] = await txDb
           .insert(routines)
@@ -1531,17 +1553,19 @@ export function routineService(
             concurrencyPolicy: input.concurrencyPolicy,
             catchUpPolicy: input.catchUpPolicy,
             variables,
+            idempotencyKey: input.idempotencyKey ?? null,
             createdByAgentId: actor.agentId ?? null,
             createdByUserId: actor.userId ?? null,
             updatedByAgentId: actor.agentId ?? null,
             updatedByUserId: actor.userId ?? null,
           })
           .returning();
-        const { routine } = await appendRoutineRevision(txDb, created, actor, {
+        const { routine: updated } = await appendRoutineRevision(txDb, created, actor, {
           changeSummary: "Created routine",
         });
-        return routine;
+        return updated;
       });
+      return { routine, idempotent: false };
     },
 
     update: async (id: string, patch: UpdateRoutine, actor: Actor): Promise<Routine | null> => {
