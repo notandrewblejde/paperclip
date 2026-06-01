@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { agents } from "./agents.js";
 import { companies } from "./companies.js";
 import { companySecrets } from "./company_secrets.js";
@@ -44,6 +45,7 @@ export const routines = pgTable(
     updatedByUserId: text("updated_by_user_id"),
     lastTriggeredAt: timestamp("last_triggered_at", { withTimezone: true }),
     lastEnqueuedAt: timestamp("last_enqueued_at", { withTimezone: true }),
+    idempotencyKey: text("idempotency_key"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -51,6 +53,9 @@ export const routines = pgTable(
     companyStatusIdx: index("routines_company_status_idx").on(table.companyId, table.status),
     companyAssigneeIdx: index("routines_company_assignee_idx").on(table.companyId, table.assigneeAgentId),
     companyProjectIdx: index("routines_company_project_idx").on(table.companyId, table.projectId),
+    idempotencyKeyIdx: uniqueIndex("routines_company_idempotency_key_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
   }),
 );
 

@@ -666,6 +666,13 @@
       "when": 1780281600000,
       "tag": "0094_issue_idempotency_key",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1780281600001,
+      "tag": "0095_routine_idempotency_key",
+      "breakpoints": true
     }
   ]
 }

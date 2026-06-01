@@ -97,6 +97,21 @@ export function routineRoutes(
     const companyId = req.params.companyId as string;
     await assertBoardCanAssignTasks(req, companyId);
     assertCanManageCompanyRoutine(req, companyId, req.body.assigneeAgentId);
+
+    // SPC-6991 — fast-path idempotency. If this POST carries an
+    // idempotencyKey we've already accepted for this company, return the
+    // prior row without re-running activity log or telemetry.
+    const idempotencyKey = typeof req.body.idempotencyKey === "string"
+      ? req.body.idempotencyKey.trim()
+      : "";
+    if (idempotencyKey.length > 0) {
+      const existing = await svc.getByIdempotencyKey(companyId, idempotencyKey);
+      if (existing) {
+        res.status(200).json({ ...existing, idempotentReturn: true });
+        return;
+      }
+    }
+
     const created = await svc.create(companyId, req.body, {
       agentId: req.actor.type === "agent" ? req.actor.agentId : null,
       userId: req.actor.type === "board" ? req.actor.userId ?? "board" : null,

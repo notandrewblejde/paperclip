@@ -499,4 +499,65 @@ describeEmbeddedPostgres("routine routes end-to-end", () => {
       executionWorkspaceSettings: { mode: "isolated_workspace" },
     });
   });
+
+  // SPC-6991 — routine create dedup at the platform layer. Racing
+  // heartbeats that author the same routine with the same idempotencyKey
+  // should collapse to a single row; the second POST returns 200 with
+  // idempotentReturn=true and no second routine.created activity-log row.
+  it("dedups POST /companies/:id/routines on idempotencyKey across racing callers", async () => {
+    const { companyId, agentId, projectId, userId } = await seedFixture();
+    const app = await createApp({
+      type: "board",
+      userId,
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const idempotencyKey = "eod-wake:trading-day-2026-06-01";
+    const body = {
+      projectId,
+      title: "EU EOD wake",
+      assigneeAgentId: agentId,
+      idempotencyKey,
+    };
+
+    const first = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send(body);
+    expect([200, 201]).toContain(first.status);
+    expect(first.body.id).toBeTruthy();
+    const routineId = first.body.id as string;
+
+    const second = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send(body);
+    expect(second.status).toBe(200);
+    expect(second.body.id).toBe(routineId);
+    expect(second.body.idempotentReturn).toBe(true);
+
+    const persistedRoutines = await db
+      .select({ id: routines.id, idempotencyKey: routines.idempotencyKey })
+      .from(routines)
+      .where(eq(routines.companyId, companyId));
+    expect(persistedRoutines).toHaveLength(1);
+    expect(persistedRoutines[0]?.idempotencyKey).toBe(idempotencyKey);
+
+    const createdEvents = await db
+      .select({ entityId: activityLog.entityId })
+      .from(activityLog)
+      .where(eq(activityLog.companyId, companyId));
+    const routineCreatedRows = createdEvents.filter((row) => row.entityId === routineId);
+    expect(routineCreatedRows).toHaveLength(1);
+
+    const third = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Different routine",
+        assigneeAgentId: agentId,
+      });
+    expect([200, 201]).toContain(third.status);
+    expect(third.body.id).not.toBe(routineId);
+  }, 15_000);
 });

@@ -79,6 +79,19 @@ type Actor = { agentId?: string | null; userId?: string | null; runId?: string |
 type RoutineRow = typeof routines.$inferSelect;
 type RoutineTriggerRow = typeof routineTriggers.$inferSelect;
 
+// SPC-6991 — name of the partial unique index that enforces (company_id,
+// idempotency_key) on the routines table. Matches the index name in the
+// 0095 migration. The post-insert catch in `create` uses this to detect
+// the narrow race between the pre-check and the insert.
+export const ROUTINE_IDEMPOTENCY_KEY_CONSTRAINT = "routines_company_idempotency_key_uq";
+
+export function isRoutineIdempotencyKeyConflict(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const err = error as { code?: string; constraint?: string; constraint_name?: string };
+  const constraint = err.constraint ?? err.constraint_name;
+  return err.code === "23505" && constraint === ROUTINE_IDEMPOTENCY_KEY_CONSTRAINT;
+}
+
 interface RoutineTriggerSecretRestoreMaterial extends RoutineTriggerSecretMaterial {
   triggerId: string;
 }
@@ -1518,7 +1531,31 @@ export function routineService(
       };
     },
 
+    getByIdempotencyKey: async (companyId: string, idempotencyKey: string): Promise<Routine | null> => {
+      return await db
+        .select()
+        .from(routines)
+        .where(and(eq(routines.companyId, companyId), eq(routines.idempotencyKey, idempotencyKey)))
+        .then((rows) => rows[0] ?? null);
+    },
+
     create: async (companyId: string, input: CreateRoutine, actor: Actor): Promise<Routine> => {
+      // SPC-6991 — honor idempotencyKey on routine create so racing heartbeats
+      // that author the same routine collapse to one row. The pre-check is a
+      // fast-path; the post-insert catch handles the narrow race window
+      // between pre-check and insert against the partial unique index.
+      const idempotencyKey =
+        typeof input.idempotencyKey === "string" && input.idempotencyKey.trim().length > 0
+          ? input.idempotencyKey.trim()
+          : null;
+      if (idempotencyKey) {
+        const existing = await db
+          .select()
+          .from(routines)
+          .where(and(eq(routines.companyId, companyId), eq(routines.idempotencyKey, idempotencyKey)))
+          .then((rows) => rows[0] ?? null);
+        if (existing) return existing;
+      }
       await assertProject(companyId, input.projectId ?? null);
       await assertAssignableAgent(companyId, input.assigneeAgentId ?? null);
       if (input.goalId) await assertGoal(companyId, input.goalId);
@@ -1535,44 +1572,57 @@ export function routineService(
       );
       assertRoutineVariableDefinitions(variables);
       const status = normalizeDraftRoutineStatus(input.status, input.assigneeAgentId);
-      const createdRoutine = await db.transaction(async (tx) => {
-        const txDb = tx as unknown as Db;
-        const [created] = await txDb
-          .insert(routines)
-          .values({
-            companyId,
-            projectId: input.projectId ?? null,
-            goalId: input.goalId ?? null,
-            parentIssueId: input.parentIssueId ?? null,
-            title: input.title,
-            description: input.description ?? null,
-            assigneeAgentId: input.assigneeAgentId ?? null,
-            priority: input.priority,
-            status,
-            concurrencyPolicy: input.concurrencyPolicy,
-            catchUpPolicy: input.catchUpPolicy,
-            variables,
-            env,
-            createdByAgentId: actor.agentId ?? null,
-            createdByUserId: actor.userId ?? null,
-            updatedByAgentId: actor.agentId ?? null,
-            updatedByUserId: actor.userId ?? null,
-          })
-          .returning();
-        const { routine } = await appendRoutineRevision(txDb, created, actor, {
-          changeSummary: "Created routine",
+      try {
+        const createdRoutine = await db.transaction(async (tx) => {
+          const txDb = tx as unknown as Db;
+          const [created] = await txDb
+            .insert(routines)
+            .values({
+              companyId,
+              projectId: input.projectId ?? null,
+              goalId: input.goalId ?? null,
+              parentIssueId: input.parentIssueId ?? null,
+              title: input.title,
+              description: input.description ?? null,
+              assigneeAgentId: input.assigneeAgentId ?? null,
+              priority: input.priority,
+              status,
+              concurrencyPolicy: input.concurrencyPolicy,
+              catchUpPolicy: input.catchUpPolicy,
+              variables,
+              env,
+              createdByAgentId: actor.agentId ?? null,
+              createdByUserId: actor.userId ?? null,
+              updatedByAgentId: actor.agentId ?? null,
+              updatedByUserId: actor.userId ?? null,
+              idempotencyKey,
+            })
+            .returning();
+          const { routine } = await appendRoutineRevision(txDb, created, actor, {
+            changeSummary: "Created routine",
+          });
+          if (env) {
+            await secretsSvc.syncEnvBindingsForTarget(
+              companyId,
+              { targetType: "routine", targetId: routine.id },
+              env,
+              { db: tx },
+            );
+          }
+          return routine;
         });
-        if (env) {
-          await secretsSvc.syncEnvBindingsForTarget(
-            companyId,
-            { targetType: "routine", targetId: routine.id },
-            env,
-            { db: tx },
-          );
+        return createdRoutine;
+      } catch (error) {
+        if (idempotencyKey && isRoutineIdempotencyKeyConflict(error)) {
+          const existing = await db
+            .select()
+            .from(routines)
+            .where(and(eq(routines.companyId, companyId), eq(routines.idempotencyKey, idempotencyKey)))
+            .then((rows) => rows[0] ?? null);
+          if (existing) return existing;
         }
-        return routine;
-      });
-      return createdRoutine;
+        throw error;
+      }
     },
 
     update: async (id: string, patch: UpdateRoutine, actor: Actor): Promise<Routine | null> => {

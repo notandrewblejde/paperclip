@@ -101,6 +101,7 @@ const mockRoutineService = vi.hoisted(() => ({
   list: vi.fn(),
   get: vi.fn(),
   getDetail: vi.fn(),
+  getByIdempotencyKey: vi.fn(),
   update: vi.fn(),
   create: vi.fn(),
   listRevisions: vi.fn(),
@@ -203,6 +204,7 @@ describe("routine routes", () => {
       source: "manual",
       status: "issue_created",
     });
+    mockRoutineService.getByIdempotencyKey.mockResolvedValue(null);
     mockAccessService.canUser.mockResolvedValue(false);
     mockLogActivity.mockResolvedValue(undefined);
   });
@@ -466,5 +468,101 @@ describe("routine routes", () => {
       runId: null,
     });
     expect(mockTrackRoutineCreated).toHaveBeenCalledWith(expect.anything());
+  });
+
+  // SPC-6991 — fast-path idempotency. Racing heartbeats that send the same
+  // idempotencyKey on POST /api/companies/:id/routines should collapse to a
+  // single create + a 200 idempotent return on the second call, with no
+  // duplicate activity-log or telemetry side effects.
+  it("returns 200 + idempotentReturn=true when POST replays a known idempotencyKey", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    mockRoutineService.getByIdempotencyKey.mockResolvedValue({
+      ...routine,
+      idempotencyKey: "eod-wake:trading-day-2026-06-01",
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Daily routine",
+        assigneeAgentId: agentId,
+        idempotencyKey: "eod-wake:trading-day-2026-06-01",
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(routineId);
+    expect(res.body.idempotentReturn).toBe(true);
+    expect(mockRoutineService.getByIdempotencyKey).toHaveBeenCalledWith(
+      companyId,
+      "eod-wake:trading-day-2026-06-01",
+    );
+    expect(mockRoutineService.create).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockTrackRoutineCreated).not.toHaveBeenCalled();
+  });
+
+  it("creates a new routine when idempotencyKey has not been seen yet", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    mockRoutineService.getByIdempotencyKey.mockResolvedValue(null);
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Daily routine",
+        assigneeAgentId: agentId,
+        idempotencyKey: "eod-wake:trading-day-2026-06-01",
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockRoutineService.getByIdempotencyKey).toHaveBeenCalledWith(
+      companyId,
+      "eod-wake:trading-day-2026-06-01",
+    );
+    expect(mockRoutineService.create).toHaveBeenCalledWith(
+      companyId,
+      expect.objectContaining({ idempotencyKey: "eod-wake:trading-day-2026-06-01" }),
+      expect.anything(),
+    );
+    expect(mockLogActivity).toHaveBeenCalled();
+    expect(mockTrackRoutineCreated).toHaveBeenCalled();
+  });
+
+  it("skips the idempotency lookup when no idempotencyKey is supplied", async () => {
+    mockAccessService.canUser.mockResolvedValue(true);
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: false,
+      companyIds: [companyId],
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/routines`)
+      .send({
+        projectId,
+        title: "Daily routine",
+        assigneeAgentId: agentId,
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockRoutineService.getByIdempotencyKey).not.toHaveBeenCalled();
+    expect(mockRoutineService.create).toHaveBeenCalled();
   });
 });
