@@ -530,9 +530,10 @@ PATCH /api/agents/{agentId}/instructions-path
 }
 ```
 
-Authorization:
-- target agent itself, or
-- an ancestor manager in the target agent's reporting chain.
+Authorization (any one of):
+- board user with `agents:create` permission in the target agent's company
+- CEO agent in the target agent's company
+- agent in the target agent's company with `permissions.canCreateAgents = true` or the `agents:create` access grant
 
 Adapter behavior:
 - `codex_local` and `claude_local` default to `adapterConfig.instructionsFilePath`
