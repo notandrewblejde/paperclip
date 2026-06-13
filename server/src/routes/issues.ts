@@ -105,6 +105,25 @@ const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
 
+const JANITOR_FLIPPABLE_STATUSES = ["todo", "blocked", "done", "cancelled"] as const;
+const ISSUE_JANITOR_MAX_ACTIONS = 500;
+const issueJanitorActionSchema = z
+  .object({
+    issueId: z.string().trim().min(1),
+    status: z.enum(JANITOR_FLIPPABLE_STATUSES).optional(),
+    blockedByIssueIds: z.array(z.string().trim().uuid()).max(50).optional(),
+    comment: z.string().trim().min(1).max(8000).optional(),
+  })
+  .refine(
+    (data) => data.status !== undefined || data.blockedByIssueIds !== undefined || data.comment !== undefined,
+    { message: "Each action must mutate status, blockedByIssueIds, or comment" },
+  );
+const issueJanitorRequestSchema = z.object({
+  actions: z.array(issueJanitorActionSchema).min(1).max(ISSUE_JANITOR_MAX_ACTIONS),
+  reason: z.string().trim().min(3).max(500),
+  dryRun: z.boolean().optional(),
+});
+
 type ParsedExecutionState = NonNullable<ReturnType<typeof parseIssueExecutionState>>;
 type NormalizedExecutionPolicy = NonNullable<ReturnType<typeof normalizeIssueExecutionPolicy>>;
 type CompanySearchService = {
@@ -987,6 +1006,46 @@ export function issueRoutes(
     if (runId) return runId;
     res.status(401).json({ error: "Agent run id required" });
     return null;
+  }
+
+  // Authorize the bulk janitor endpoint. The endpoint bypasses the usual
+  // assigneeAgentId ownership check, so it must be gated tightly.
+  // Allowed: board users with company access, or agents whose role is "cto"
+  // or "ceo" inside the same company. Per SPC-9378 acceptance criteria,
+  // non-CTO/non-board agents continue to receive 403 on cross-agent mutations.
+  async function assertJanitorActor(req: Request, res: Response, companyId: string): Promise<boolean> {
+    if (req.actor.type === "board") {
+      // assertCompanyAccess (called by the route) already verified board company access.
+      return true;
+    }
+    if (req.actor.type !== "agent") {
+      res.status(403).json({ error: "Janitor endpoint requires board user or cto/ceo agent" });
+      return false;
+    }
+    const actorAgentId = req.actor.agentId;
+    if (!actorAgentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return false;
+    }
+    if (req.actor.companyId !== companyId) {
+      res.status(403).json({ error: "Agent key cannot access another company" });
+      return false;
+    }
+    if (!requireAgentRunId(req, res)) return false;
+    const actorAgent = await agentsSvc.getById(actorAgentId);
+    if (!actorAgent || actorAgent.companyId !== companyId) {
+      res.status(403).json({ error: "Janitor endpoint requires cto or ceo role" });
+      return false;
+    }
+    if (actorAgent.role === "cto" || actorAgent.role === "ceo") return true;
+    res.status(403).json({
+      error: "Janitor endpoint requires cto or ceo role",
+      details: {
+        role: actorAgent.role,
+        securityPrinciples: ["Least Privilege", "Complete Mediation"],
+      },
+    });
+    return false;
   }
 
   async function hasActiveCheckoutManagementOverride(
@@ -2540,6 +2599,162 @@ export function issueRoutes(
 
     res.json(result);
   });
+
+  // SPC-9378: Privileged janitor endpoint for bulk cross-agent status/blocker
+  // cleanup. The PATCH /api/issues/:id route enforces an assigneeAgentId
+  // ownership check that prevents historical backlog janitor passes
+  // (SPC-9376) from cleaning up zero-blocker stale-`blocked` issues owned
+  // by other agents. This endpoint bypasses that check, but only for board
+  // users and agents with role cto/ceo. Every mutation logs an activity
+  // entry capturing prior status/assignee, the operator-supplied reason,
+  // and the run id for audit.
+  router.post(
+    "/companies/:companyId/issues/janitor",
+    validate(issueJanitorRequestSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      if (!(await assertJanitorActor(req, res, companyId))) return;
+
+      const { actions, reason, dryRun = false } = req.body as z.infer<typeof issueJanitorRequestSchema>;
+      const actor = getActorInfo(req);
+
+      type JanitorOutcome = "applied" | "would_apply" | "skipped" | "denied";
+      type JanitorActionResult = {
+        issueId: string;
+        identifier: string | null;
+        outcome: JanitorOutcome;
+        priorStatus: string | null;
+        priorAssigneeAgentId: string | null;
+        nextStatus?: string | null;
+        denyReason?: string;
+        commentId?: string;
+        error?: string;
+      };
+
+      const results: JanitorActionResult[] = [];
+
+      for (const action of actions) {
+        const issue = await svc.getById(action.issueId);
+        if (!issue) {
+          results.push({
+            issueId: action.issueId,
+            identifier: null,
+            outcome: "skipped",
+            priorStatus: null,
+            priorAssigneeAgentId: null,
+            denyReason: "not_found",
+          });
+          continue;
+        }
+        if (issue.companyId !== companyId) {
+          results.push({
+            issueId: issue.id,
+            identifier: issue.identifier ?? null,
+            outcome: "denied",
+            priorStatus: issue.status,
+            priorAssigneeAgentId: issue.assigneeAgentId,
+            denyReason: "cross_company",
+          });
+          continue;
+        }
+
+        if (dryRun) {
+          results.push({
+            issueId: issue.id,
+            identifier: issue.identifier ?? null,
+            outcome: "would_apply",
+            priorStatus: issue.status,
+            priorAssigneeAgentId: issue.assigneeAgentId,
+            nextStatus: action.status ?? issue.status,
+          });
+          continue;
+        }
+
+        try {
+          let nextStatus = issue.status;
+          if (action.status !== undefined || action.blockedByIssueIds !== undefined) {
+            const updated = await svc.update(issue.id, {
+              ...(action.status !== undefined ? { status: action.status } : {}),
+              ...(action.blockedByIssueIds !== undefined ? { blockedByIssueIds: action.blockedByIssueIds } : {}),
+              actorAgentId: actor.actorType === "agent" ? actor.agentId : null,
+              actorUserId: actor.actorType === "user" ? actor.actorId : null,
+            });
+            if (updated) nextStatus = updated.status;
+          }
+
+          let commentId: string | undefined;
+          if (action.comment) {
+            const comment = await svc.addComment(issue.id, action.comment, {
+              agentId: actor.actorType === "agent" ? actor.agentId ?? undefined : undefined,
+              userId: actor.actorType === "user" ? actor.actorId : undefined,
+              runId: actor.runId,
+            });
+            commentId = comment.id;
+          }
+
+          await logActivity(db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            action: "issue.janitor_flip",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              reason,
+              priorStatus: issue.status,
+              priorAssigneeAgentId: issue.assigneeAgentId,
+              nextStatus,
+              statusChanged: action.status !== undefined,
+              blockedByChanged: action.blockedByIssueIds !== undefined,
+              commentPosted: !!commentId,
+              ...(commentId ? { commentId } : {}),
+            },
+          });
+
+          results.push({
+            issueId: issue.id,
+            identifier: issue.identifier ?? null,
+            outcome: "applied",
+            priorStatus: issue.status,
+            priorAssigneeAgentId: issue.assigneeAgentId,
+            nextStatus,
+            ...(commentId ? { commentId } : {}),
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "unknown_error";
+          results.push({
+            issueId: issue.id,
+            identifier: issue.identifier ?? null,
+            outcome: "denied",
+            priorStatus: issue.status,
+            priorAssigneeAgentId: issue.assigneeAgentId,
+            denyReason: "update_failed",
+            error: message,
+          });
+        }
+      }
+
+      const summary = results.reduce<Record<JanitorOutcome, number>>(
+        (acc, item) => {
+          acc[item.outcome] = (acc[item.outcome] ?? 0) + 1;
+          return acc;
+        },
+        { applied: 0, would_apply: 0, skipped: 0, denied: 0 },
+      );
+
+      res.json({
+        dryRun,
+        reason,
+        runId: actor.runId,
+        total: results.length,
+        summary,
+        actions: results,
+      });
+    },
+  );
 
   router.patch("/issues/:id", validate(updateIssueRouteSchema), async (req, res) => {
     const id = req.params.id as string;
