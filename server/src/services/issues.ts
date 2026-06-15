@@ -70,6 +70,7 @@ import {
 import { mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { buildInitialIssueMonitorFields, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText } from "../redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
@@ -3119,6 +3120,7 @@ async function countBlockedInboxIssues(dbOrTx: any, companyId: string, filters?:
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
+  const recoveryActionsSvc = issueRecoveryActionService(db);
 
   async function getIssueByUuid(id: string) {
     const row = await db
@@ -5405,6 +5407,41 @@ export function issueService(db: Db) {
                   eq(issueRelations.type, "blocks"),
                 ),
               );
+          }
+        }
+        if (
+          existing.status === "blocked" &&
+          issueData.status &&
+          issueData.status !== existing.status &&
+          (
+            issueData.status === "in_progress" ||
+            issueData.status === "done" ||
+            issueData.status === "in_review" ||
+            issueData.status === "cancelled"
+          )
+        ) {
+          const activeRecoveryAction = await tx
+            .select({ id: issueRecoveryActions.id, kind: issueRecoveryActions.kind })
+            .from(issueRecoveryActions)
+            .where(
+              and(
+                eq(issueRecoveryActions.companyId, existing.companyId),
+                eq(issueRecoveryActions.sourceIssueId, existing.id),
+                eq(issueRecoveryActions.kind, "missing_disposition"),
+                inArray(issueRecoveryActions.status, ["active", "escalated"]),
+              ),
+            )
+            .limit(1)
+            .then((rows: Array<{ id: string; kind: string }>) => rows[0] ?? null);
+          if (activeRecoveryAction) {
+            await recoveryActionsSvc.resolveActiveForIssue({
+              companyId: existing.companyId,
+              sourceIssueId: existing.id,
+              actionId: activeRecoveryAction.id,
+              status: "resolved",
+              outcome: "recovery_owner_patch",
+              resolutionNote: `Recovery owner moved source issue from blocked to ${issueData.status}.`,
+            }, tx);
           }
         }
         return enriched;

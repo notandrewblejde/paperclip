@@ -41,6 +41,7 @@ import {
   issueApprovals,
   issueComments,
   issuePlanDecompositions,
+  issueRecoveryActions,
   issueRelations,
   issueThreadInteractions,
   issues,
@@ -4946,6 +4947,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       existingWake,
       budgetBlock,
       pauseHold,
+      activeMissingDispositionRecoveryAction,
     ] = await Promise.all([
       issue
         ? db
@@ -5071,6 +5073,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issue
         ? treeControlSvc.getActivePauseHoldGate(issue.companyId, issue.id)
         : Promise.resolve(null),
+      issue
+        ? db
+          .select({ id: issueRecoveryActions.id })
+          .from(issueRecoveryActions)
+          .where(
+            and(
+              eq(issueRecoveryActions.companyId, issue.companyId),
+              eq(issueRecoveryActions.sourceIssueId, issue.id),
+              eq(issueRecoveryActions.kind, "missing_disposition"),
+              inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
     ]);
 
     const decision = decideSuccessfulRunHandoff({
@@ -5085,6 +5102,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       hasPendingInteractionOrApproval: Boolean(pendingInteraction || pendingApproval),
       hasExplicitBlockerPath: Boolean(explicitBlocker),
       hasOpenRecoveryIssue: Boolean(openRecoveryIssue),
+      hasActiveMissingDispositionRecoveryAction: Boolean(activeMissingDispositionRecoveryAction),
       hasPauseHold: Boolean(pauseHold),
       budgetBlocked: Boolean(budgetBlock),
       idempotentWakeExists: Boolean(existingWake),

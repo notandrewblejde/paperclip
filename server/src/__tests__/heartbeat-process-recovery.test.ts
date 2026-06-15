@@ -96,6 +96,7 @@ import {
   heartbeatService,
   redactDetectedSuccessfulRunProgressSummaryForBoard,
 } from "../services/heartbeat.ts";
+import { issueService } from "../services/issues.ts";
 import {
   SUCCESSFUL_RUN_HANDOFF_EXHAUSTED_NOTICE_BODY,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
@@ -1874,6 +1875,93 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       latestRunStatus: "succeeded",
       missingDisposition: "clear_next_step",
     });
+  });
+
+  it("resolves the missing-disposition recovery action and suppresses re-handoff when CEO PATCHes blocked → in_progress", async () => {
+    const { companyId, agentId, runId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      livenessState: "advanced",
+    });
+    const sourceRunId = randomUUID();
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "finish_successful_run_handoff",
+          sourceRunId,
+          resumeFromRunId: sourceRunId,
+          handoffRequired: true,
+          handoffReason: "successful_run_missing_state",
+          missingDisposition: "clear_next_step",
+          handoffAttempt: 1,
+          maxHandoffAttempts: 1,
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+    const issues_ = issueService(db);
+
+    const escalateResult = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(escalateResult.successfulRunHandoffEscalated).toBe(1);
+
+    const escalatedAction = await waitForValue(async () =>
+      db
+        .select()
+        .from(issueRecoveryActions)
+        .where(
+          and(
+            eq(issueRecoveryActions.companyId, companyId),
+            eq(issueRecoveryActions.sourceIssueId, issueId),
+            eq(issueRecoveryActions.kind, "missing_disposition"),
+            inArray(issueRecoveryActions.status, ["active", "escalated"]),
+          ),
+        )
+        .then((rows) => rows[0] ?? null),
+    );
+    expect(escalatedAction).toBeTruthy();
+
+    const handoffWakeupCountBeforePatch = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.reason, "finish_successful_run_handoff"),
+        ),
+      )
+      .then((rows) => rows.length);
+
+    const patched = await issues_.update(issueId, { status: "in_progress" });
+    expect(patched?.status).toBe("in_progress");
+
+    const resolvedAction = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.id, escalatedAction!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(resolvedAction).toMatchObject({
+      status: "resolved",
+      outcome: "recovery_owner_patch",
+    });
+    expect(resolvedAction?.resolvedAt).toBeTruthy();
+
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await waitForHeartbeatIdle(db, 5_000);
+
+    const handoffWakeupCountAfterPatch = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(
+        and(
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.reason, "finish_successful_run_handoff"),
+        ),
+      )
+      .then((rows) => rows.length);
+    expect(handoffWakeupCountAfterPatch).toBe(handoffWakeupCountBeforePatch);
   });
 
   it("clears the detached warning when the run reports activity again", async () => {
