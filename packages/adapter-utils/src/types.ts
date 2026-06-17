@@ -77,6 +77,13 @@ export interface AdapterExecutionResult {
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
   /**
+   * True when `usage` was recovered from streamed-but-not-finalized output —
+   * e.g. the child was SIGKILLed or timed out before emitting a terminal
+   * result frame. Consumers should record the partial telemetry but treat the
+   * numbers as a floor, not a closed total.
+   */
+  usagePartial?: boolean;
+  /**
    * Legacy single session id output. Prefer `sessionParams` + `sessionDisplayId`.
    */
   sessionId?: string | null;
@@ -387,6 +394,23 @@ export interface ServerAdapterModule {
    * the adapter does not support detection or no config is found.
    */
   detectModel?: () => Promise<{ model: string; provider: string; source: string; candidates?: string[] } | null>;
+  /**
+   * Optional: recover partial usage from a captured stdout stream when the
+   * child process was killed before emitting a terminal result frame.
+   *
+   * `stdout` is the concatenated stdout content reconstructed from the
+   * persisted run log. The adapter is responsible for parsing whatever
+   * format its underlying CLI emits and aggregating per-turn usage so the
+   * harness can persist the partial telemetry on a `process_lost` run.
+   *
+   * Return `null` (or a result with `usage: null`) when no usage can be
+   * recovered — the harness will leave `usageJson` null in that case.
+   */
+  recoverPartialUsage?: (stdout: string) => {
+    usage: UsageSummary | null;
+    partialUsageMessages: number;
+    model?: string | null;
+  } | null;
   /**
    * Optional: return a declarative config schema so the UI can render
    * adapter-specific form fields without shipping React components.

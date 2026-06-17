@@ -1,4 +1,4 @@
-export { execute, runClaudeLogin } from "./execute.js";
+export { claudeSessionCwdMatchesExecutionTarget, execute, runClaudeLogin } from "./execute.js";
 export { listClaudeSkills, syncClaudeSkills } from "./skills.js";
 export { listClaudeModels } from "./models.js";
 export { testEnvironment } from "./test.js";
@@ -8,6 +8,30 @@ export {
   isClaudeMaxTurnsResult,
   isClaudeUnknownSessionError,
 } from "./parse.js";
+import { parseClaudeStreamJson } from "./parse.js";
+
+/**
+ * Recover aggregated usage from a partial Claude stream-json stdout buffer.
+ * Used by the harness when the heartbeat child is SIGKILL-ed before the
+ * terminal `result` frame is emitted, so the per-turn `assistant` usage
+ * already streamed can be flushed to the run row's `usageJson` (SPC-6119).
+ */
+export function recoverPartialUsage(stdout: string): {
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
+  partialUsageMessages: number;
+  model: string | null;
+} | null {
+  if (!stdout) return null;
+  const parsed = parseClaudeStreamJson(stdout);
+  if (!parsed.usagePartial || !parsed.usage) {
+    return { usage: null, partialUsageMessages: 0, model: parsed.model || null };
+  }
+  return {
+    usage: parsed.usage,
+    partialUsageMessages: parsed.partialUsageMessages,
+    model: parsed.model || null,
+  };
+}
 export {
   getQuotaWindows,
   readClaudeAuthStatus,
