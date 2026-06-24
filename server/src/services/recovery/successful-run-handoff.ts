@@ -328,6 +328,7 @@ export function decideSuccessfulRunHandoff(input: {
   hasPauseHold: boolean;
   budgetBlocked: boolean;
   idempotentWakeExists: boolean;
+  hasActiveMissingDispositionRecoveryAction: boolean;
 }): SuccessfulRunHandoffDecision {
   const { run, issue, agent } = input;
 
@@ -365,6 +366,9 @@ export function decideSuccessfulRunHandoff(input: {
   if (input.budgetBlocked) return { kind: "skip", reason: "budget hard stop blocks corrective wake" };
   if (input.idempotentWakeExists) {
     return { kind: "skip", reason: "corrective handoff wake already exists for this source run" };
+  }
+  if (input.hasActiveMissingDispositionRecoveryAction) {
+    return { kind: "skip", reason: "active missing-disposition recovery action owns the next action" };
   }
 
   const instruction = buildSuccessfulRunHandoffInstruction({

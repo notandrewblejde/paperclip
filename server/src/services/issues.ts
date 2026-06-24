@@ -17,6 +17,7 @@ import {
   issueAttachments,
   issueInboxArchives,
   issueLabels,
+  issueRecoveryActions,
   issueRelations,
   issueComments,
   issueDocuments,
@@ -3288,6 +3289,26 @@ export function issueService(db: Db) {
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+
+        if (issueData.status && existing.status === "blocked" && issueData.status !== "blocked") {
+          await tx
+            .update(issueRecoveryActions)
+            .set({
+              status: "resolved",
+              outcome: "recovery_owner_patch",
+              resolvedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(issueRecoveryActions.companyId, existing.companyId),
+                eq(issueRecoveryActions.sourceIssueId, id),
+                eq(issueRecoveryActions.kind, "missing_disposition"),
+                eq(issueRecoveryActions.status, "active"),
+              ),
+            );
+        }
+
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }

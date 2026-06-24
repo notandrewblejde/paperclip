@@ -53,6 +53,7 @@ function decide(overrides: Partial<Parameters<typeof decideSuccessfulRunHandoff>
     hasPauseHold: false,
     budgetBlocked: false,
     idempotentWakeExists: false,
+    hasActiveMissingDispositionRecoveryAction: false,
     ...overrides,
   });
 }
@@ -293,5 +294,12 @@ describe("successful run handoff decision", () => {
     expect(isSuccessfulRunHandoffRequiredNoticeBody("## Successful run missing issue disposition\n\nold body")).toBe(true);
     expect(isSuccessfulRunHandoffRequiredNoticeBody("## This issue still needs a next step\n\nold body")).toBe(true);
     expect(isSuccessfulRunHandoffRequiredNoticeBody("Unrelated comment")).toBe(false);
+  });
+
+  it("does not queue when an active missing-disposition recovery action owns the next action", () => {
+    expect(decide({ hasActiveMissingDispositionRecoveryAction: true })).toEqual({
+      kind: "skip",
+      reason: "active missing-disposition recovery action owns the next action",
+    });
   });
 });

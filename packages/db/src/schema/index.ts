@@ -38,6 +38,7 @@ export { issueLabels } from "./issue_labels.js";
 export { issueApprovals } from "./issue_approvals.js";
 export { issueComments } from "./issue_comments.js";
 export { issueThreadInteractions } from "./issue_thread_interactions.js";
+export { issueRecoveryActions } from "./issue_recovery_actions.js";
 export { issueTreeHolds } from "./issue_tree_holds.js";
 export { issueTreeHoldMembers } from "./issue_tree_hold_members.js";
 export { issueExecutionDecisions } from "./issue_execution_decisions.js";
