@@ -36,6 +36,8 @@ import {
   issues,
   projects,
   projectWorkspaces,
+  routines,
+  routineTriggers,
   workspaceOperations,
 } from "@paperclipai/db";
 import {
@@ -2155,6 +2157,66 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // genuine-strand detection downstream is preserved.
     expect(result.waitingOnReviewResolved).toBe(0);
     await expect(sourceBlockerIssueIds(companyId, issueId)).resolves.toEqual([]);
+  });
+
+  it("skips escalation for an in_progress issue backed by a routine with a future scheduled fire", async () => {
+    const { companyId, runId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "succeeded",
+      livenessState: "advanced",
+    });
+    const routineId = randomUUID();
+    const triggerId = randomUUID();
+
+    await db.insert(routines).values({
+      id: routineId,
+      companyId,
+      title: "Daily standing routine",
+      status: "active",
+      parentIssueId: issueId,
+      assigneeAgentId: null,
+      concurrencyPolicy: "coalesce_if_active",
+      catchUpPolicy: "skip_missed",
+      latestRevisionNumber: 1,
+    });
+
+    await db.insert(routineTriggers).values({
+      id: triggerId,
+      companyId,
+      routineId,
+      kind: "schedule",
+      enabled: true,
+      cronExpression: "0 22 * * *",
+      timezone: "UTC",
+      nextRunAt: new Date(Date.now() + 60 * 60 * 1000),
+    });
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        contextSnapshot: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "finish_successful_run_handoff",
+          sourceRunId: randomUUID(),
+          handoffRequired: true,
+          handoffReason: "successful_run_missing_state",
+          missingDisposition: "clear_next_step",
+          handoffAttempt: 1,
+          maxHandoffAttempts: 1,
+        },
+      })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.successfulRunHandoffEscalated).toBe(0);
+    expect(result.escalated).toBe(0);
+    expect(result.skipped).toBeGreaterThan(0);
+
+    const issueAfter = await db.select().from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0]);
+    expect(issueAfter?.status).toBe("in_progress");
   });
 
   it("clears the detached warning when the run reports activity again", async () => {
