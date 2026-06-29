@@ -153,6 +153,7 @@ function createDb(requireBoardApprovalForNewAgents = false) {
         where: vi.fn(async () => [
           {
             id: "company-1",
+            companyId: "company-1",
             requireBoardApprovalForNewAgents,
           },
         ]),

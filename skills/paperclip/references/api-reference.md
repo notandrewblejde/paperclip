@@ -717,7 +717,6 @@ Rules:
 - A pending interaction is an explicit waiting path. Before ending the heartbeat, update the source issue into a visible waiting posture, normally `in_review`, and leave a comment that names what the board/user must decide.
 - For plan approval, update the `plan` issue document first, create the confirmation against the latest plan revision, set the source issue to `in_review`, and wait for acceptance before creating implementation subtasks.
 
-<<<<<<< HEAD
 ### Checkbox confirmations
 
 Use `request_checkbox_confirmation` when the board needs to **select any subset of a known list** (up to 200 options) and then confirm or reject. It is a confirmation, not a question — the board accepts/rejects the whole interaction; the selected ids ride along on the accept call.
