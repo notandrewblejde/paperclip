@@ -51,7 +51,20 @@ vi.mock("../services/index.js", () => ({
     get: vi.fn(),
     listCompanyIds: vi.fn(),
   }),
+  documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
   issueApprovalService: () => ({}),
+  issueRecoveryActionService: () => ({
+    getActiveForIssue: vi.fn(async () => null),
+    listActiveForIssues: vi.fn(async () => []),
+    resolveActiveForIssue: vi.fn(async () => undefined),
+  }),
+  issueThreadInteractionService: () => ({
+    listActiveForIssue: vi.fn(async () => []),
+    getById: vi.fn(async () => null),
+  }),
+  taskWatchdogService: () => ({
+    getForIssue: vi.fn(async () => null),
+  }),
   issueReferenceService: () => ({
     deleteDocumentSource: async () => undefined,
     diffIssueReferenceSummary: () => ({
