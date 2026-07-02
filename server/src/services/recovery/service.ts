@@ -3948,7 +3948,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         sourceIssueId: action.sourceIssueId,
         actionId: action.id,
         status: "cancelled",
-        outcome: "auto_resolved",
+        outcome: "restored",
         resolutionNote: "Recovery action timed out. Routine execution instance auto-resolved.",
       });
 
@@ -3987,15 +3987,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           },
         });
 
-        await deps.commentOnIssue({
-          issueId: action.sourceIssueId,
-          authorType: "system",
-          body: `Recovery action timed out. Routine execution instance auto-resolved.\n\nRecovery action: \`${action.id}\``,
-          metadata: {
-            recoveryActionId: action.id,
-            outcome: "auto_resolved",
+        await issuesSvc.addComment(
+          action.sourceIssueId,
+          `Recovery action timed out. Routine execution instance auto-resolved.\n\nRecovery action: \`${action.id}\``,
+          { agentId: null },
+          {
+            authorType: "system",
+            metadata: {
+              recoveryActionId: action.id,
+              outcome: "restored",
+            },
           },
-        });
+        );
       }
     }
 

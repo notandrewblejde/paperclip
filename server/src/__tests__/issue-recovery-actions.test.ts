@@ -1259,14 +1259,14 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       sourceIssueId,
       actionId: action.id,
       status: "cancelled",
-      outcome: "auto_resolved",
+      outcome: "restored",
       resolutionNote: "Recovery action timed out.",
     });
 
     // Verify the action is now cancelled
     expect(resolved).not.toBeNull();
     expect(resolved?.status).toBe("cancelled");
-    expect(resolved?.outcome).toBe("auto_resolved");
+    expect(resolved?.outcome).toBe("restored");
     expect(resolved?.resolutionNote).toBe("Recovery action timed out.");
   });
 });
