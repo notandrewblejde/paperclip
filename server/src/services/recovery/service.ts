@@ -3990,7 +3990,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         await issuesSvc.addComment(
           action.sourceIssueId,
           `Recovery action timed out. Routine execution instance auto-resolved.\n\nRecovery action: \`${action.id}\``,
-          { agentId: null },
+          {},
           {
             authorType: "system",
             metadata: {
