@@ -5064,6 +5064,12 @@ export function issueService(db: Db) {
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
+      if (data.status === "blocked") {
+        const blockerIds = blockedByIssueIds ?? [];
+        if (blockerIds.length === 0) {
+          throw unprocessable("blocked status requires at least one blocker in blockedByIssueIds. Use SPC-15379 gate: every blocked issue must have first-class blockers or a named unblock owner/action in the description.");
+        }
+      }
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
@@ -5321,6 +5327,12 @@ export function issueService(db: Db) {
             ).get(id)?.unresolvedBlockerIssueIds ?? [];
         if (unresolvedBlockerIssueIds.length > 0) {
           throw unprocessable("Issue is blocked by unresolved blockers", { unresolvedBlockerIssueIds });
+        }
+      }
+      if (patch.status === "blocked") {
+        const nextBlockedByIssueIds = blockedByIssueIds !== undefined ? blockedByIssueIds : existing.blockedByIssueIds ?? [];
+        if (nextBlockedByIssueIds.length === 0) {
+          throw unprocessable("blocked status requires at least one blocker in blockedByIssueIds. Use SPC-15379 gate: every blocked issue must have first-class blockers or a named unblock owner/action in the description.");
         }
       }
       const shouldValidateNextAssignee =

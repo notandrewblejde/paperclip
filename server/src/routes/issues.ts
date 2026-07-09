@@ -5227,6 +5227,20 @@ export function issueRoutes(
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
 
+    if (createBody.status === "blocked") {
+      const hasBlockerIds = Array.isArray(createBody.blockedByIssueIds) && createBody.blockedByIssueIds.length > 0;
+      if (!hasBlockerIds) {
+        res.status(400).json({
+          error: "Validation error",
+          details: [{
+            path: ["status"],
+            message: "status=blocked requires either blockedByIssueIds (non-empty) or a comment naming the unblock owner and exact action",
+          }],
+        });
+        return;
+      }
+    }
+
     const executionPolicy = applyActorMonitorScheduledBy(
       normalizeIssueExecutionPolicy(createBody.executionPolicy),
       actor.actorType,
@@ -5811,6 +5825,20 @@ export function issueRoutes(
     } = req.body;
     const shouldCancelActiveRunForCancelledStatus =
       existing.status !== "cancelled" && updateFields.status === "cancelled";
+    if (updateFields.status === "blocked") {
+      const hasBlockerIds = Array.isArray(req.body.blockedByIssueIds) && req.body.blockedByIssueIds.length > 0;
+      const hasBlockerComment = !!commentBody;
+      if (!hasBlockerIds && !hasBlockerComment) {
+        res.status(400).json({
+          error: "Validation error",
+          details: [{
+            path: ["status"],
+            message: "status=blocked requires either blockedByIssueIds (non-empty) or a comment naming the unblock owner and exact action",
+          }],
+        });
+        return;
+      }
+    }
     if (resumeRequested === true && !commentBody) {
       res.status(400).json({ error: "Follow-up intent requires a comment" });
       return;
