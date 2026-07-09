@@ -5067,7 +5067,7 @@ export function issueService(db: Db) {
       if (data.status === "blocked") {
         const blockerIds = blockedByIssueIds ?? [];
         if (blockerIds.length === 0) {
-          throw unprocessable("blocked status requires at least one blocker in blockedByIssueIds. Use SPC-15379 gate: every blocked issue must have first-class blockers or a named unblock owner/action in the description.");
+          throw unprocessable("blocked status requires at least one blocker in blockedByIssueIds. Every blocked issue must have first-class blocker links (SPC-13428 / SPC-15379). Populate blockedByIssueIds with the issue IDs that block this work.");
         }
       }
       return db.transaction(async (tx) => {
@@ -5332,7 +5332,7 @@ export function issueService(db: Db) {
       if (patch.status === "blocked") {
         const nextBlockedByIssueIds = blockedByIssueIds !== undefined ? blockedByIssueIds : existing.blockedByIssueIds ?? [];
         if (nextBlockedByIssueIds.length === 0) {
-          throw unprocessable("blocked status requires at least one blocker in blockedByIssueIds. Use SPC-15379 gate: every blocked issue must have first-class blockers or a named unblock owner/action in the description.");
+          throw unprocessable("blocked status requires at least one blocker in blockedByIssueIds. Every blocked issue must have first-class blocker links (SPC-13428 / SPC-15379). Populate blockedByIssueIds with the issue IDs that block this work.");
         }
       }
       const shouldValidateNextAssignee =

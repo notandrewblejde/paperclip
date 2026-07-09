@@ -5234,7 +5234,7 @@ export function issueRoutes(
           error: "Validation error",
           details: [{
             path: ["status"],
-            message: "status=blocked requires either blockedByIssueIds (non-empty) or a comment naming the unblock owner and exact action",
+            message: "status=blocked requires blockedByIssueIds (non-empty). Every blocked issue must have first-class blocker links. Populate blockedByIssueIds with the issue IDs that block this work.",
           }],
         });
         return;
@@ -5827,13 +5827,12 @@ export function issueRoutes(
       existing.status !== "cancelled" && updateFields.status === "cancelled";
     if (updateFields.status === "blocked") {
       const hasBlockerIds = Array.isArray(req.body.blockedByIssueIds) && req.body.blockedByIssueIds.length > 0;
-      const hasBlockerComment = !!commentBody;
-      if (!hasBlockerIds && !hasBlockerComment) {
+      if (!hasBlockerIds) {
         res.status(400).json({
           error: "Validation error",
           details: [{
             path: ["status"],
-            message: "status=blocked requires either blockedByIssueIds (non-empty) or a comment naming the unblock owner and exact action",
+            message: "status=blocked requires blockedByIssueIds (non-empty). Every blocked issue must have first-class blocker links. Populate blockedByIssueIds with the issue IDs that block this work.",
           }],
         });
         return;
