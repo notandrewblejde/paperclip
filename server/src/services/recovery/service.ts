@@ -2774,10 +2774,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
 
-      const activeRecoveryAction = await issueRecoveryActionService.getActiveForIssue(issue.companyId, issue.id);
+      const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id);
       if (activeRecoveryAction) {
-        result.skipped += 1;
-        continue;
+        const now = new Date();
+        const lastAttemptDate = activeRecoveryAction.lastAttemptAt instanceof Date
+          ? activeRecoveryAction.lastAttemptAt
+          : activeRecoveryAction.lastAttemptAt ? new Date(activeRecoveryAction.lastAttemptAt) : null;
+
+        const hoursSinceLastAttempt = lastAttemptDate
+          ? (now.getTime() - lastAttemptDate.getTime()) / (1000 * 60 * 60)
+          : Infinity;
+
+        // Only skip reconciliation if recovery action is fresh (recent attempts or low attempt count)
+        // If attempts are stale (1+ hour) or excessive (3+ attempts), allow reconciliation to proceed
+        const isRecent = hoursSinceLastAttempt < 1;
+        const isFreshAttempt = activeRecoveryAction.attemptCount < 3;
+
+        if (isRecent || isFreshAttempt) {
+          result.skipped += 1;
+          continue;
+        }
       }
 
       if (await isAutomaticRecoverySuppressedByPauseHold(db, issue.companyId, issue.id, treeControlSvc)) {
