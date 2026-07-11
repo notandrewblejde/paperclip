@@ -776,6 +776,152 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
+  it("allows CEO-authenticated instructions-path updates", async () => {
+    const ceoAgentId = "44444444-4444-4444-8444-444444444444";
+    const targetAgentId = "55555555-5555-4555-8555-555555555555";
+    const targetAgent = {
+      ...baseAgent,
+      id: targetAgentId,
+      adapterType: "codex_local",
+      adapterConfig: {},
+    };
+    const ceoAgent = {
+      ...baseAgent,
+      id: ceoAgentId,
+      role: "ceo",
+      permissions: { canCreateAgents: true },
+    };
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ceoAgentId) return ceoAgent;
+      if (id === targetAgentId) return targetAgent;
+      return baseAgent;
+    });
+    mockAgentService.update.mockResolvedValue({
+      ...targetAgent,
+      adapterConfig: { instructionsFilePath: "/srv/agents/codex/AGENTS.md" },
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: ceoAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${targetAgentId}/instructions-path`)
+      .send({ path: "/srv/agents/codex/AGENTS.md" }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toEqual(expect.objectContaining({
+      agentId: targetAgentId,
+      adapterConfigKey: "instructionsFilePath",
+    }));
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      targetAgentId,
+      expect.objectContaining({
+        adapterConfig: expect.objectContaining({
+          instructionsFilePath: "/srv/agents/codex/AGENTS.md",
+        }),
+      }),
+      expect.objectContaining({
+        recordRevision: expect.objectContaining({
+          createdByAgentId: ceoAgentId,
+          source: "instructions_path_patch",
+        }),
+      }),
+    );
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "agent.instructions_path_updated",
+        entityId: targetAgentId,
+      }),
+    );
+  });
+
+  it("allows agent-creator-authenticated instructions-path updates", async () => {
+    const creatorAgentId = "66666666-6666-4666-8666-666666666666";
+    const targetAgentId = "77777777-7777-4777-8777-777777777777";
+    const targetAgent = {
+      ...baseAgent,
+      id: targetAgentId,
+      adapterType: "codex_local",
+      adapterConfig: {},
+    };
+    const creatorAgent = {
+      ...baseAgent,
+      id: creatorAgentId,
+      role: "engineer",
+      permissions: { canCreateAgents: true },
+    };
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === creatorAgentId) return creatorAgent;
+      if (id === targetAgentId) return targetAgent;
+      return baseAgent;
+    });
+    mockAgentService.update.mockResolvedValue({
+      ...targetAgent,
+      adapterConfig: { instructionsFilePath: "/srv/agents/codex/AGENTS.md" },
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: creatorAgentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${targetAgentId}/instructions-path`)
+      .send({ path: "/srv/agents/codex/AGENTS.md" }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalled();
+  });
+
+  it("blocks cross-tenant CEO-authenticated instructions-path updates", async () => {
+    const ceoAgentId = "88888888-8888-4888-8888-888888888888";
+    const otherCompanyId = "99999999-9999-4999-8999-999999999999";
+    const targetAgentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const ceoAgent = {
+      ...baseAgent,
+      id: ceoAgentId,
+      companyId: otherCompanyId,
+      role: "ceo",
+      permissions: { canCreateAgents: true },
+    };
+    const targetAgent = {
+      ...baseAgent,
+      id: targetAgentId,
+      adapterType: "codex_local",
+      adapterConfig: {},
+    };
+    mockAgentService.getById.mockImplementation(async (id: string) => {
+      if (id === ceoAgentId) return ceoAgent;
+      if (id === targetAgentId) return targetAgent;
+      return baseAgent;
+    });
+
+    const app = await createApp({
+      type: "agent",
+      agentId: ceoAgentId,
+      companyId: otherCompanyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${targetAgentId}/instructions-path`)
+      .send({ path: "/srv/agents/codex/AGENTS.md" }));
+
+    expect(res.status).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
   it("blocks agent-authenticated hires that set instructions bundle config", async () => {
     mockAccessService.hasPermission.mockResolvedValue(true);
 
