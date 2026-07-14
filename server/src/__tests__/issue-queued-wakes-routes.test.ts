@@ -51,11 +51,16 @@ vi.mock("../services/index.js", () => ({
     get: vi.fn(),
     listCompanyIds: vi.fn(),
   }),
+  companySearchService: () => ({}),
+  documentAnnotationService: () => ({ remapOpenThreadsForDocument: async () => [] }),
   issueApprovalService: () => ({}),
   issueRecoveryActionService: () => ({
     getActiveForIssue: vi.fn(async () => null),
     listActiveForIssues: vi.fn(async () => new Map()),
   }),
+  issueThreadInteractionService: () => ({}),
+  issueTreeControlService: () => ({}),
+  taskWatchdogService: () => ({}),
   issueReferenceService: () => ({
     deleteDocumentSource: async () => undefined,
     diffIssueReferenceSummary: () => ({
