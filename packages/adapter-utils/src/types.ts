@@ -31,7 +31,14 @@ export interface AdapterRuntime {
 export interface UsageSummary {
   inputTokens: number;
   outputTokens: number;
+  /** Tokens read from the prompt cache (cache hits). */
   cachedInputTokens?: number;
+  /**
+   * Tokens written to the prompt cache (cache-creation / cache-write). Needed
+   * alongside `cachedInputTokens` to compute the exact prompt-cache hit rate:
+   * cachedInputTokens / (cachedInputTokens + cacheCreationInputTokens + inputTokens).
+   */
+  cacheCreationInputTokens?: number;
 }
 
 export type AdapterBillingType =

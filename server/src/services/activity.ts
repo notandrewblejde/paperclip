@@ -60,6 +60,16 @@ export function activityService(db: Db) {
           ${heartbeatRuns.usageJson} -> 'cached_input_tokens',
           ${heartbeatRuns.usageJson} -> 'cachedInputTokens'
         ),
+        'cacheCreationInputTokens', coalesce(
+          ${heartbeatRuns.usageJson} -> 'cacheCreationInputTokens',
+          ${heartbeatRuns.usageJson} -> 'rawCacheCreationInputTokens',
+          ${heartbeatRuns.usageJson} -> 'cache_creation_input_tokens'
+        ),
+        'cache_creation_input_tokens', coalesce(
+          ${heartbeatRuns.usageJson} -> 'cache_creation_input_tokens',
+          ${heartbeatRuns.usageJson} -> 'cacheCreationInputTokens',
+          ${heartbeatRuns.usageJson} -> 'rawCacheCreationInputTokens'
+        ),
         'billingType', coalesce(${heartbeatRuns.usageJson} -> 'billingType', ${heartbeatRuns.usageJson} -> 'billing_type'),
         'billing_type', coalesce(${heartbeatRuns.usageJson} -> 'billing_type', ${heartbeatRuns.usageJson} -> 'billingType'),
         'costUsd', coalesce(

@@ -2774,7 +2774,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
 
-      const activeRecoveryAction = await issueRecoveryActionService.getActiveForIssue(issue.companyId, issue.id);
+      const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id);
       if (activeRecoveryAction) {
         result.skipped += 1;
         continue;
