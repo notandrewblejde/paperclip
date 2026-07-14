@@ -963,6 +963,14 @@ export async function startServer(): Promise<StartedServer> {
             logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
           }
         })
+        .then(async () => {
+          // Zero-read prompt-cache guardrail (SPC-22537). Self-throttled; emits a
+          // critical log event on fleet-wide cache-read collapse.
+          const cacheHealth = await heartbeat.reconcilePromptCacheReadGuardrail();
+          if (cacheHealth.status === "read_collapse") {
+            logger.warn({ ...cacheHealth }, "periodic prompt-cache guardrail detected read collapse");
+          }
+        })
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");
         });
