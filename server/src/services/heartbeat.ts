@@ -3,7 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   AGENT_DEFAULT_MAX_CONCURRENT_RUNS,
@@ -156,6 +156,11 @@ import {
   readContinuationAttempt,
 } from "./recovery/index.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./recovery/pause-hold-guard.js";
+import {
+  classifyPromptCacheReadHealth,
+  type PromptCacheGuardrailOptions,
+  type PromptCacheReadHealth,
+} from "./prompt-cache-guardrail.js";
 import {
   recoveryAssigneeAdapterOverrides,
   withRecoveryModelProfileHint,
@@ -9081,6 +9086,86 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   async function reconcileTaskWatchdogs(opts?: { companyId?: string | null; runId?: string | null }) {
     return taskWatchdogs.reconcileTaskWatchdogs(opts);
   }
+  // --- Zero-read prompt-cache guardrail (SPC-22537) -----------------------
+  // Protect the SPC-22535 prompt-caching saving against silent regression. If a
+  // volatile value leaks into the cached prefix, fleet-wide
+  // `cache_read_input_tokens` collapses toward zero with no other symptom. We
+  // aggregate recent usage fleet-wide, classify it, and emit a critical log
+  // event on collapse. The DB check and the alarm are independently throttled so
+  // this is cheap even on a fast scheduler interval.
+  const PROMPT_CACHE_GUARDRAIL_WINDOW_MS = 6 * 60 * 60 * 1000; // 6h lookback
+  const PROMPT_CACHE_GUARDRAIL_CHECK_INTERVAL_MS = 15 * 60 * 1000; // check at most every 15m
+  const PROMPT_CACHE_GUARDRAIL_ALARM_COOLDOWN_MS = 60 * 60 * 1000; // re-alarm at most hourly
+  let promptCacheGuardrailLastCheckMs = 0;
+  let promptCacheGuardrailLastAlarmMs = 0;
+
+  async function reconcilePromptCacheReadGuardrail(opts?: {
+    now?: Date;
+    force?: boolean;
+    windowMs?: number;
+    thresholds?: Partial<PromptCacheGuardrailOptions>;
+  }): Promise<PromptCacheReadHealth | { status: "skipped"; reason: string }> {
+    const now = opts?.now ?? new Date();
+    const nowMs = now.getTime();
+    if (!opts?.force && nowMs - promptCacheGuardrailLastCheckMs < PROMPT_CACHE_GUARDRAIL_CHECK_INTERVAL_MS) {
+      return { status: "skipped", reason: "checked recently" };
+    }
+    promptCacheGuardrailLastCheckMs = nowMs;
+
+    const windowMs = opts?.windowMs ?? PROMPT_CACHE_GUARDRAIL_WINDOW_MS;
+    const windowStart = new Date(nowMs - windowMs);
+
+    // Extract token counts from usageJson, tolerating every key variant the
+    // adapter / activity projection may have written (camelCase, snake_case, and
+    // the `raw*` heartbeat fields). Values are numbers stored in jsonb, so the
+    // `->>` text extraction casts cleanly to numeric; missing keys coalesce to 0.
+    const sumInput = sql<number>`coalesce(sum(coalesce(
+      (${heartbeatRuns.usageJson} ->> 'inputTokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'input_tokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'rawInputTokens')::numeric,
+      0)), 0)`;
+    const sumRead = sql<number>`coalesce(sum(coalesce(
+      (${heartbeatRuns.usageJson} ->> 'cachedInputTokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'cached_input_tokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'cache_read_input_tokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'rawCachedInputTokens')::numeric,
+      0)), 0)`;
+    const sumCreation = sql<number>`coalesce(sum(coalesce(
+      (${heartbeatRuns.usageJson} ->> 'cacheCreationInputTokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'cache_creation_input_tokens')::numeric,
+      (${heartbeatRuns.usageJson} ->> 'rawCacheCreationInputTokens')::numeric,
+      0)), 0)`;
+
+    const [row] = await db
+      .select({
+        runsWithUsage: sql<number>`count(*)`,
+        inputTokens: sumInput,
+        cacheReadTokens: sumRead,
+        cacheCreationTokens: sumCreation,
+      })
+      .from(heartbeatRuns)
+      .where(and(isNotNull(heartbeatRuns.usageJson), gte(heartbeatRuns.createdAt, windowStart)));
+
+    const health = classifyPromptCacheReadHealth(
+      {
+        runsWithUsage: Number(row?.runsWithUsage ?? 0),
+        inputTokens: Number(row?.inputTokens ?? 0),
+        cacheReadTokens: Number(row?.cacheReadTokens ?? 0),
+        cacheCreationTokens: Number(row?.cacheCreationTokens ?? 0),
+      },
+      opts?.thresholds,
+    );
+
+    if (health.status === "read_collapse" && nowMs - promptCacheGuardrailLastAlarmMs >= PROMPT_CACHE_GUARDRAIL_ALARM_COOLDOWN_MS) {
+      promptCacheGuardrailLastAlarmMs = nowMs;
+      logger.error(
+        { event: "prompt_cache_read_collapse", windowMs, ...health },
+        "Prompt-cache read share collapsed fleet-wide — a volatile value likely leaked into the cached prefix (SPC-22537). Investigate the prompt prefix immediately; this silently increases cost.",
+      );
+    }
+
+    return health;
+  }
 
   async function buildRunOutputSilence(
     run: Pick<
@@ -13390,6 +13475,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     reconcileProductivityReviews,
 
     reconcileTaskWatchdogs,
+
+    reconcilePromptCacheReadGuardrail,
 
     buildRunOutputSilence,
 
