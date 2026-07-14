@@ -153,6 +153,9 @@ function createDb(requireBoardApprovalForNewAgents = false) {
         where: vi.fn(async () => [
           {
             id: "company-1",
+            // Also present so the sourceIssueId same-company check (SPC-11888) in the
+            // agent-hires route reads a matching companyId from this shared fake row.
+            companyId: "company-1",
             requireBoardApprovalForNewAgents,
           },
         ]),
