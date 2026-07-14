@@ -7,7 +7,43 @@ import {
   isClaudeRefusalResult,
   isClaudeUnknownSessionError,
   isClaudeImageProcessingError,
+  parseClaudeStreamJson,
 } from "./parse.js";
+
+describe("parseClaudeStreamJson usage", () => {
+  it("captures cache_creation_input_tokens alongside cache_read_input_tokens", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      session_id: "sess-1",
+      result: "done",
+      total_cost_usd: 0.02,
+      usage: {
+        input_tokens: 100,
+        cache_read_input_tokens: 9000,
+        cache_creation_input_tokens: 500,
+        output_tokens: 42,
+      },
+    });
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.usage).toEqual({
+      inputTokens: 100,
+      cachedInputTokens: 9000,
+      cacheCreationInputTokens: 500,
+      outputTokens: 42,
+    });
+  });
+
+  it("defaults cacheCreationInputTokens to 0 when absent", () => {
+    const stdout = JSON.stringify({
+      type: "result",
+      session_id: "sess-2",
+      result: "done",
+      usage: { input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 1 },
+    });
+    const parsed = parseClaudeStreamJson(stdout);
+    expect(parsed.usage?.cacheCreationInputTokens).toBe(0);
+  });
+});
 
 describe("detectClaudeLoginRequired", () => {
   it("classifies Claude's invalid API key login prompt as auth required", () => {
