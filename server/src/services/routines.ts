@@ -58,6 +58,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { issueService } from "./issues.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
+import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { secretService } from "./secrets.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { parseCron, validateCron } from "./cron.js";
@@ -188,6 +189,7 @@ function nextResultText(status: string, issueId?: string | null) {
   if (status === "issue_created" && issueId) return `Created execution issue ${issueId}`;
   if (status === "coalesced") return "Coalesced into an existing live execution issue";
   if (status === "skipped_paused") return "Skipped because the project is paused";
+  if (status === "skipped_agent_unavailable") return "Skipped because the assignee agent is not invokable";
   if (status === "skipped") return "Skipped because a live execution issue already exists";
   if (status === "completed") return "Execution issue completed";
   if (status === "failed") return "Execution failed";
@@ -1255,6 +1257,20 @@ export function routineService(
       .then((rows) => rows[0] ?? null);
   }
 
+  async function getAssigneeOrgRow(agentId: string) {
+    return db
+      .select({
+        id: agents.id,
+        companyId: agents.companyId,
+        name: agents.name,
+        reportsTo: agents.reportsTo,
+        status: agents.status,
+      })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function createWebhookSecret(
     companyId: string,
     routineId: string,
@@ -1408,7 +1424,22 @@ export function routineService(
     if (!assigneeAgentId) {
       throw unprocessable("Default agent required");
     }
-    await assertAssignableAgent(db, input.routine.companyId, assigneeAgentId, { kind: "routine" });
+    // Evaluate *invokability* (not just assignability) up front. A paused assignee is
+    // assignable but not invokable: creating an execution issue here would only get rolled back
+    // when the downstream assignment wakeup rejects with "Agent is not invokable in its current
+    // state", vaporizing the scheduled run with no issue, comment, or audit trail (SPC-28815,
+    // root-caused on SPC-28792). When the assignee cannot be woken we record a first-class,
+    // non-destructive skip below instead of the create-then-rollback hard failure.
+    //
+    // Manual/API callers are still hard-gated by assertAssignableAgent at their call sites, so a
+    // terminated / pending-approval assignee keeps returning a synchronous 409 there. Gating the
+    // dispatch proceed-path on invokability (which is strictly stronger than assignability:
+    // invokable ⟹ assignable) also stops a terminated assignee from throwing mid-tick and
+    // aborting the whole scheduler pass on the background schedule/webhook paths.
+    const assigneeInvokability = await evaluateAgentInvokabilityFromDb(
+      db,
+      await getAssigneeOrgRow(assigneeAgentId),
+    );
     const automaticVariables: Record<string, string | number | boolean> = {};
     if (input.executionWorkspaceId && routineUsesWorkspaceBranch(input.routine)) {
       const workspace = await db
@@ -1506,6 +1537,31 @@ export function routineService(
       const nextRunAt = input.trigger?.kind === "schedule" && input.trigger.cronExpression && input.trigger.timezone
         ? nextCronTickInTimeZone(input.trigger.cronExpression, input.trigger.timezone, triggeredAt)
         : undefined;
+
+      // First-class, non-destructive outcome when the assignee cannot be woken (paused,
+      // pending_approval, terminated, invalid org chain). No execution issue is created — so
+      // there is nothing to roll back — and the run is recorded with a distinct terminal status
+      // carrying the reason, so the run list and trigger audit show *why* work did not happen.
+      // Reserve `failed` for genuine dispatch errors. Catch-up: like the project-paused skip
+      // (`recordSuppressedScheduleRun`), the missed tick is dropped rather than replayed on
+      // resume — `catchUpPolicy:enqueue_missed_with_cap` only backfills server-downtime gaps,
+      // not invokability-gated skips. See SPC-28815.
+      if (!assigneeInvokability.invokable) {
+        const skipReason = `assignee_not_invokable:${assigneeInvokability.reason}`;
+        const updated = await finalizeRun(createdRun.id, {
+          status: "skipped_agent_unavailable",
+          failureReason: skipReason,
+          completedAt: triggeredAt,
+        }, txDb);
+        await updateRoutineTouchedState({
+          routineId: input.routine.id,
+          triggerId: input.trigger?.id ?? null,
+          triggeredAt,
+          status: "skipped_agent_unavailable",
+          nextRunAt,
+        }, txDb);
+        return updated ?? createdRun;
+      }
 
       let createdIssue: Awaited<ReturnType<typeof issueSvc.create>> | null = null;
       try {
@@ -1668,6 +1724,44 @@ export function routineService(
         });
       } catch (err) {
         logger.warn({ err, routineId: input.routine.id, runId: run.id }, "failed to log automated routine run");
+      }
+    }
+
+    // Surface non-invokable-assignee skips to operators on every source. A company-wide pause
+    // otherwise silently eats weeks of scheduled work (this incident: 3+ weeks, ~every routine,
+    // zero trail — SPC-28792). The distinct run status makes it visible in the run list; this
+    // structured log + activity row make it greppable/alertable.
+    if (run.status === "skipped_agent_unavailable") {
+      logger.warn(
+        {
+          routineId: input.routine.id,
+          runId: run.id,
+          triggerId: input.trigger?.id ?? null,
+          source: run.source,
+          assigneeAgentId,
+          reason: run.failureReason,
+        },
+        "routine dispatch skipped: assignee agent is not invokable",
+      );
+      try {
+        await logActivity(db, {
+          companyId: input.routine.companyId,
+          actorType: "system",
+          actorId: input.source === "webhook" ? "routine-webhook" : "routine-scheduler",
+          action: "routine.run_skipped",
+          entityType: "routine_run",
+          entityId: run.id,
+          details: {
+            routineId: input.routine.id,
+            triggerId: input.trigger?.id ?? null,
+            source: run.source,
+            status: run.status,
+            assigneeAgentId,
+            reason: run.failureReason,
+          },
+        });
+      } catch (err) {
+        logger.warn({ err, routineId: input.routine.id, runId: run.id }, "failed to log skipped routine run");
       }
     }
 

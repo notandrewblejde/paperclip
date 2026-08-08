@@ -1821,4 +1821,99 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(runsAfterResume).toHaveLength(2);
     expect(runsAfterResume.some((run) => run.status === "issue_created")).toBe(true);
   });
+
+  // SPC-28815: a paused/non-invokable assignee must be a first-class, visible, non-destructive
+  // skip — never a trail-less create-then-rollback hard `failed` (root cause SPC-28792).
+  it("records a non-destructive skip (no issue, no rollback) when a manual run targets a paused assignee", async () => {
+    const { agentId, companyId, routine, svc, wakeups } = await seedFixture();
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+
+    const run = await svc.runRoutine(routine.id, { source: "manual" });
+
+    expect(run.status).toBe("skipped_agent_unavailable");
+    expect(run.failureReason).toBe("assignee_not_invokable:paused");
+    expect(run.linkedIssueId).toBeNull();
+    expect(run.completedAt).not.toBeNull();
+    // No execution issue was created, so there is nothing to roll back.
+    const createdIssues = await db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(createdIssues).toHaveLength(0);
+    // The assignee was never woken.
+    expect(wakeups).toHaveLength(0);
+    // Exactly one run row persists as the visible skip (not a deleted/failed run).
+    const runs = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.status).toBe("skipped_agent_unavailable");
+  });
+
+  it.each([
+    ["paused", "assignee_not_invokable:paused"],
+    ["terminated", "assignee_not_invokable:terminated"],
+    ["pending_approval", "assignee_not_invokable:pending_approval"],
+  ])(
+    "records a visible skip on the scheduled path for the non-invokable assignee status %s (front-gate/back-gate parity)",
+    async (status, expectedReason) => {
+      const { agentId, companyId, routine, svc, wakeups } = await seedFixture();
+      const { trigger } = await svc.createTrigger(
+        routine.id,
+        { kind: "schedule", label: "daily", cronExpression: "0 0 * * *", timezone: "UTC" },
+        {},
+      );
+
+      const pastDue = new Date("2020-01-01T00:00:00.000Z");
+      await db.update(agents).set({ status }).where(eq(agents.id, agentId));
+      await db.update(routineTriggers).set({ nextRunAt: pastDue }).where(eq(routineTriggers.id, trigger.id));
+
+      // The tick must not throw (a terminated assignee previously aborted the whole pass).
+      await expect(svc.tickScheduledTriggers(new Date())).resolves.toBeDefined();
+
+      const createdIssues = await db.select().from(issues).where(eq(issues.companyId, companyId));
+      expect(createdIssues).toHaveLength(0);
+      expect(wakeups).toHaveLength(0);
+
+      const runs = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+      expect(runs).toHaveLength(1);
+      expect(runs[0]?.status).toBe("skipped_agent_unavailable");
+      expect(runs[0]?.source).toBe("schedule");
+      expect(runs[0]?.failureReason).toBe(expectedReason);
+      expect(runs[0]?.linkedIssueId).toBeNull();
+
+      // Trigger audit advances past the skipped firing and surfaces the reason.
+      const advancedTrigger = await db
+        .select()
+        .from(routineTriggers)
+        .where(eq(routineTriggers.id, trigger.id))
+        .then((rows) => rows[0]);
+      expect(advancedTrigger!.nextRunAt!.getTime()).toBeGreaterThan(pastDue.getTime());
+      expect(advancedTrigger?.lastResult).toMatch(/not invokable/i);
+
+      // Operators get a distinct activity trail (not silently vaporized).
+      const skipActivity = await db
+        .select()
+        .from(activityLog)
+        .where(eq(activityLog.entityId, runs[0]!.id));
+      expect(skipActivity.some((entry) => entry.action === "routine.run_skipped")).toBe(true);
+    },
+  );
+
+  it("still dispatches normally when the assignee is invokable (regression)", async () => {
+    const { companyId, routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(
+      routine.id,
+      { kind: "schedule", label: "daily", cronExpression: "0 0 * * *", timezone: "UTC" },
+      {},
+    );
+
+    const pastDue = new Date("2020-01-01T00:00:00.000Z");
+    await db.update(routineTriggers).set({ nextRunAt: pastDue }).where(eq(routineTriggers.id, trigger.id));
+
+    const result = await svc.tickScheduledTriggers(new Date());
+    expect(result.triggered).toBe(1);
+
+    const runs = await db.select().from(routineRuns).where(eq(routineRuns.routineId, routine.id));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.status).toBe("issue_created");
+    expect(runs[0]?.linkedIssueId).toBeTruthy();
+    const createdIssues = await db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(createdIssues).toHaveLength(1);
+  });
 });
