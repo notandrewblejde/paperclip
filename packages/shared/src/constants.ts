@@ -547,6 +547,7 @@ export const ROUTINE_RUN_STATUSES = [
   "received",
   "coalesced",
   "skipped",
+  "skipped_agent_unavailable",
   "issue_created",
   "completed",
   "failed",
