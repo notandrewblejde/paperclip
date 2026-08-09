@@ -51,6 +51,7 @@ import {
   extractClaudeRetryNotBefore,
   isClaudeMaxTurnsResult,
   isClaudeRefusalResult,
+  isClaudeSuccessResult,
   isClaudeTransientUpstreamError,
   isClaudeUnknownSessionError,
   isClaudePoisonedPreviousMessageIdError,
@@ -907,7 +908,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
     const claudeRefusal = isClaudeRefusalResult(parsed);
     const parsedIsError = asBoolean(parsed.is_error, false);
-    const failed = (proc.exitCode ?? 0) !== 0 || parsedIsError;
+    // A terminal `subtype=success` result (with is_error unset) means the run
+    // actually completed. The CLI can still exit non-zero *after* emitting that
+    // result (a teardown / signal race), so a non-zero exit code alone must not
+    // reclassify a completed run as failed — otherwise Paperclip records
+    // `Claude run failed: subtype=success: ...` and flips the agent to `error`
+    // even though the heartbeat's work was done. is_error is still honored so a
+    // genuine error result falls through to the normal failure path. SPC-29208.
+    const claudeSuccess = isClaudeSuccessResult(parsed);
+    const failed = parsedIsError || (!claudeSuccess && (proc.exitCode ?? 0) !== 0);
     // Validate-before-persist guard: never persist a sessionId whose transcript
     // is known-poisoned. The Claude CLI keeps an on-disk JSONL keyed by the
     // session id; if the last entry contains a non-`msg_`-prefixed

@@ -5,6 +5,7 @@ import {
   isClaudeTransientUpstreamError,
   isClaudePoisonedPreviousMessageIdError,
   isClaudeRefusalResult,
+  isClaudeSuccessResult,
   isClaudeUnknownSessionError,
   isClaudeImageProcessingError,
   parseClaudeStreamJson,
@@ -252,6 +253,45 @@ describe("isClaudeRefusalResult", () => {
   it("returns false for null/empty parsed result", () => {
     expect(isClaudeRefusalResult(null)).toBe(false);
     expect(isClaudeRefusalResult({})).toBe(false);
+  });
+});
+
+describe("isClaudeSuccessResult", () => {
+  it("detects a clean terminal success result", () => {
+    expect(
+      isClaudeSuccessResult({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "Heartbeat complete. Summary of what I did on SPC-29153: ...",
+      }),
+    ).toBe(true);
+  });
+
+  it("treats a missing is_error flag as success (only true blocks it)", () => {
+    expect(isClaudeSuccessResult({ subtype: "success" })).toBe(true);
+  });
+
+  it("is case-insensitive and whitespace-tolerant on subtype", () => {
+    expect(isClaudeSuccessResult({ subtype: "  Success " })).toBe(true);
+  });
+
+  it("returns false when the error flag is set even with subtype=success", () => {
+    expect(
+      isClaudeSuccessResult({ subtype: "success", is_error: true }),
+    ).toBe(false);
+  });
+
+  it("returns false for non-success subtypes", () => {
+    expect(isClaudeSuccessResult({ subtype: "error_max_turns" })).toBe(false);
+    expect(isClaudeSuccessResult({ subtype: "model_refusal" })).toBe(false);
+    expect(isClaudeSuccessResult({ subtype: "error_during_execution" })).toBe(false);
+  });
+
+  it("returns false for null/empty parsed result", () => {
+    expect(isClaudeSuccessResult(null)).toBe(false);
+    expect(isClaudeSuccessResult(undefined)).toBe(false);
+    expect(isClaudeSuccessResult({})).toBe(false);
   });
 });
 
