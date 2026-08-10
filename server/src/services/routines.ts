@@ -69,6 +69,20 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 const OPEN_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked"];
 const LIVE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retry"];
+
+// SPC-29477: SPC-28815 made a paused/non-invokable assignee record a *visible* run
+// (`skipped_agent_unavailable`) + activity row instead of a rolled-back `failed`, but
+// that signal is still passive — you have to look at the run list. Nothing pushes an
+// alert when the streak repeats, so a go-live-blocking gate went dark for 26 days /
+// 16 fires with zero board-visible signal. Trip a single alert once a routine's runs
+// stall (fail or skip-for-unavailable-assignee) this many times in a row.
+//
+// `skipped` (a live execution issue already exists) and `skipped_paused` (project
+// deliberately paused) are intentional non-progress and are NOT counted — only genuine
+// dispatch failures and the non-invokable-assignee black hole this issue is about.
+const ROUTINE_STALLED_RUN_STATUSES = new Set(["failed", "skipped_agent_unavailable"]);
+const ROUTINE_FAILURE_ALERT_ORIGIN_KIND = "routine_failure_alert";
+const ROUTINE_CONSECUTIVE_FAILURE_ALERT_THRESHOLD = 3;
 const TERMINAL_ISSUE_STATUSES = new Set(["done", "cancelled"]);
 const MAX_CATCH_UP_RUNS = 25;
 const MAX_ROUTINE_REVISIONS = 100;
@@ -1271,6 +1285,121 @@ export function routineService(
       .then((rows) => rows[0] ?? null);
   }
 
+  // SPC-29477: detect a routine whose dispatches keep stalling and emit a single
+  // board-visible alert. SPC-28815 made the non-invokable-assignee case visible in the
+  // run list (`skipped_agent_unavailable`), but nothing pushes that streak anywhere —
+  // a paused assignee (or any repeated dispatch failure) still silently black-holes a
+  // recurring gate. Best-effort and dedup'd to at most one open alert per routine so a
+  // persistent streak does not spawn a fresh alert on every tick.
+  async function maybeAlertOnConsecutiveFailures(
+    routine: typeof routines.$inferSelect,
+    latestStalledRun: typeof routineRuns.$inferSelect,
+  ) {
+    // Count leading consecutive stalled runs (most recent first). Any progress status
+    // (completed / issue_created / coalesced) — or an intentional non-progress skip
+    // (`skipped`, `skipped_paused`) — breaks the streak, so a routine that recovers or
+    // is deliberately paused clears itself without an alert.
+    const recent = await db
+      .select({ status: routineRuns.status })
+      .from(routineRuns)
+      .where(
+        and(
+          eq(routineRuns.companyId, routine.companyId),
+          eq(routineRuns.routineId, routine.id),
+        ),
+      )
+      .orderBy(desc(routineRuns.createdAt), desc(routineRuns.id))
+      .limit(ROUTINE_CONSECUTIVE_FAILURE_ALERT_THRESHOLD);
+
+    let consecutive = 0;
+    for (const row of recent) {
+      if (!ROUTINE_STALLED_RUN_STATUSES.has(row.status)) break;
+      consecutive += 1;
+    }
+    if (consecutive < ROUTINE_CONSECUTIVE_FAILURE_ALERT_THRESHOLD) return;
+
+    // Dedup on the open alert (SPC-18376 sentinel-dedup discipline). This is a
+    // best-effort select-then-insert; a rare duplicate under concurrent ticks is
+    // acceptable and still far better than today's zero-alert behavior.
+    const existingAlert = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, routine.companyId),
+          eq(issues.originKind, ROUTINE_FAILURE_ALERT_ORIGIN_KIND),
+          eq(issues.originId, routine.id),
+          inArray(issues.status, OPEN_ISSUE_STATUSES),
+          isNull(issues.hiddenAt),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+    if (existingAlert) return;
+
+    const failureReason = latestStalledRun.failureReason?.trim() || "unknown dispatch failure";
+    const stalledKind = latestStalledRun.status === "skipped_agent_unavailable"
+      ? "the assignee agent is not invokable (paused, terminated, or an invalid reporting chain)"
+      : "dispatch is failing";
+    const assigneeNote = routine.assigneeAgentId
+      ? `Assignee agent: \`${routine.assigneeAgentId}\`.`
+      : "The routine has no assignee agent.";
+
+    // Board-visible signal: an UNASSIGNED, high-priority issue. Assigning it to the
+    // routine's own (likely paused) assignee would re-create the black hole, so this
+    // deliberately surfaces on the board for triage instead.
+    const alert = await issueSvc.create(routine.companyId, {
+      title: `Routine "${routine.title}" has ${consecutive} consecutive failed/skipped runs`,
+      description: [
+        `Routine \`${routine.id}\` ("${routine.title}") has accumulated ${consecutive} consecutive runs that made no progress because ${stalledKind}.`,
+        "",
+        `**Latest run:** status \`${latestStalledRun.status}\` — ${failureReason}`,
+        "",
+        assigneeNote,
+        "",
+        "While these runs keep stalling, no execution issue is created and the routine is effectively dark. Investigate and unpause / reassign / repair the routine. Full run history: `GET /api/routines/" + routine.id + "/runs`.",
+        "",
+        "_Auto-generated by the routine consecutive-failure detector (SPC-29477). Resolving this issue re-arms the alert; a new one is only created if the routine keeps stalling past the threshold._",
+      ].join("\n"),
+      status: "todo",
+      priority: "high",
+      assigneeAgentId: null,
+      originKind: ROUTINE_FAILURE_ALERT_ORIGIN_KIND,
+      originId: routine.id,
+    });
+
+    try {
+      await logActivity(db, {
+        companyId: routine.companyId,
+        actorType: "system",
+        actorId: "routine-scheduler",
+        action: "routine.consecutive_failures_alerted",
+        entityType: "routine",
+        entityId: routine.id,
+        details: {
+          routineId: routine.id,
+          consecutiveFailures: consecutive,
+          latestStatus: latestStalledRun.status,
+          failureReason,
+          alertIssueId: alert.id,
+        },
+      });
+    } catch (err) {
+      logger.warn({ err, routineId: routine.id }, "failed to log routine consecutive-failure alert");
+    }
+
+    logger.warn(
+      {
+        routineId: routine.id,
+        consecutiveFailures: consecutive,
+        alertIssueId: alert.id,
+        latestStatus: latestStalledRun.status,
+        failureReason,
+      },
+      "routine accumulated consecutive stalled dispatches; emitted board-visible alert",
+    );
+  }
+
   async function createWebhookSecret(
     companyId: string,
     routineId: string,
@@ -1762,6 +1891,26 @@ export function routineService(
         });
       } catch (err) {
         logger.warn({ err, routineId: input.routine.id, runId: run.id }, "failed to log skipped routine run");
+      }
+    }
+
+    // SPC-29477: a stalled dispatch (genuine failure or non-invokable-assignee skip)
+    // creates no execution issue, so once the routine has stalled N times in a row,
+    // push a board-visible alert. Scoped to automated (schedule/webhook) dispatches —
+    // the fire-and-forget path that silently black-holes; a manual run returns its
+    // error to the caller synchronously. Runs post-commit and best-effort — never
+    // blocks or rolls back the dispatch itself.
+    if (
+      (input.source === "schedule" || input.source === "webhook") &&
+      ROUTINE_STALLED_RUN_STATUSES.has(run.status)
+    ) {
+      try {
+        await maybeAlertOnConsecutiveFailures(input.routine, run);
+      } catch (err) {
+        logger.warn(
+          { err, routineId: input.routine.id, runId: run.id },
+          "routine consecutive-failure alert check failed",
+        );
       }
     }
 
