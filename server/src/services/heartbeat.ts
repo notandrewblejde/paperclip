@@ -2369,9 +2369,31 @@ function shouldRequireIssueCommentForWake(
   );
 }
 
-function allowsIssueInteractionWake(
+// Interaction resolutions that carry a wake_assignee continuation. `pending`
+// and `expired` never queue a continuation wake, so they are excluded here.
+const RESOLVED_INTERACTION_CONTINUATION_STATUSES = new Set([
+  "accepted",
+  "rejected",
+  "answered",
+  "cancelled",
+]);
+
+// A resolved issue-thread interaction (SPC-30159): the board/user already
+// responded, so the continuation wake must reach the assignee even when the
+// issue is dependency-blocked or the assignee is mid-run — the interaction was
+// legitimately created in that state and its answer is the next action.
+export function isResolvedInteractionContinuationWake(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
+  if (!readNonEmptyString(contextSnapshot?.interactionId)) return false;
+  const interactionStatus = readNonEmptyString(contextSnapshot?.interactionStatus);
+  return Boolean(interactionStatus && RESOLVED_INTERACTION_CONTINUATION_STATUSES.has(interactionStatus));
+}
+
+export function allowsIssueInteractionWake(
+  contextSnapshot: Record<string, unknown> | null | undefined,
+) {
+  if (isResolvedInteractionContinuationWake(contextSnapshot)) return true;
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (!wakeReason || !ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS.has(wakeReason)) return false;
   return Boolean(deriveCommentId(contextSnapshot, null));
@@ -3325,11 +3347,16 @@ function shouldAutoCheckoutIssueForWake(input: {
   return true;
 }
 
-function shouldQueueFollowupForRunningIssueWake(input: {
+export function shouldQueueFollowupForRunningIssueWake(input: {
   contextSnapshot: Record<string, unknown> | null | undefined;
   wakeCommentId: string | null;
 }) {
   if (input.wakeCommentId) return true;
+  // A resolved interaction continuation must not coalesce into an
+  // already-running session: the live adapter never re-reads the merged
+  // context snapshot, so coalescing silently drops the board's answer
+  // (SPC-30159). Defer it so a follow-up run delivers the resolution.
+  if (isResolvedInteractionContinuationWake(input.contextSnapshot)) return true;
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
   return Boolean(wakeReason && RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP.has(wakeReason));
 }

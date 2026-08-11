@@ -2953,6 +2953,8 @@ async function listIssueBlockedInboxAttentionMap(
         action: {
           label: (() => {
             switch (finding.state) {
+              case "blocked_without_blockers":
+                return "Re-arm blocked issue";
               case "blocked_by_unassigned_issue":
                 return "Assign blocker";
               case "blocked_by_assigned_backlog_issue":

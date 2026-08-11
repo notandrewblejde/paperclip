@@ -4,6 +4,7 @@ import { buildIssueGraphLivenessIncidentKey } from "./origins.js";
 export type IssueLivenessSeverity = "warning" | "critical";
 
 export type IssueLivenessState =
+  | "blocked_without_blockers"
   | "blocked_by_unassigned_issue"
   | "blocked_by_assigned_backlog_issue"
   | "blocked_by_uninvokable_assignee"
@@ -589,8 +590,44 @@ export function classifyIssueGraphLiveness(input: IssueGraphLivenessInput): Issu
     return null;
   }
 
+  function blockedWithoutBlockersFinding(issue: IssueLivenessIssueInput): IssueLivenessFinding | null {
+    if (hasExplicitWaitingPath(issue)) return null;
+
+    const ownerCandidates = ownerCandidatesForRecoveryIssue(issue, input.agents, agentsById, {
+      includeStalledAssignee: true,
+    });
+
+    return finding({
+      issue,
+      state: "blocked_without_blockers",
+      reason:
+        `${issueLabel(issue)} is blocked with no blocker issues and no wake, active run, human owner, interaction, approval, monitor, or recovery issue owning the next action — nothing will ever wake it.`,
+      dependencyPath: [issue],
+      recoveryIssue: issue,
+      recommendedOwnerCandidateAgentIds: ownerCandidates.map((candidate) => candidate.agentId),
+      recommendedOwnerCandidates: ownerCandidates,
+      recommendedAction:
+        `Re-arm ${issueLabel(issue)}: resume the work or add a first-class waiting path (blocker issues via blockedByIssueIds, a monitor, an interaction/approval, or a human owner). Free-text unblock notes are not a wake path.`,
+    });
+  }
+
   for (const issue of input.issues) {
     if (issue.status === "blocked") {
+      // A blocked issue with zero blocker edges is invisible to every
+      // blocker-edge-driven wake and sweep (SPC-30159 incident 1): the
+      // blocked-status PATCH already cleared its monitor, the stranded sweep
+      // only covers todo/in_progress, and no blocker exists to resolve. Flag
+      // it even when it is itself an unresolved blocker of another issue —
+      // the chain walk from the dependent ends at an invokable assignee and
+      // reports nothing.
+      const blockerRelations = (blockersByBlockedIssueId.get(issue.id) ?? []).filter(
+        (relation) => relation.companyId === issue.companyId,
+      );
+      if (blockerRelations.length === 0) {
+        const danglerFinding = blockedWithoutBlockersFinding(issue);
+        if (danglerFinding) findings.push(danglerFinding);
+        continue;
+      }
       if (unresolvedBlockers.has(issue.id)) continue;
       const chainFinding = firstBlockedChainFinding(issue, issue, [issue], new Set());
       if (chainFinding) findings.push(chainFinding);
