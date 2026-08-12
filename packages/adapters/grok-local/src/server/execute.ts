@@ -438,7 +438,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (model && model !== DEFAULT_GROK_LOCAL_MODEL) args.push("--model", model);
       if (reasoningEffort) args.push("--reasoning-effort", reasoningEffort);
       if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
-      if (permissionMode) args.push("--permission-mode", permissionMode);
+      // --always-approve is incompatible with --permission-mode dontAsk (dontAsk wins and denies
+      // run_terminal_command, aborting the whole run). Skip the conflicting flag when auto-approving.
+      if (permissionMode && !(alwaysApprove && permissionMode === "dontAsk")) {
+        args.push("--permission-mode", permissionMode);
+      }
       if (alwaysApprove) args.push("--always-approve");
       if (disableWebSearch) args.push("--disable-web-search");
       if (stagedAssets.rulesFilePath) args.push("--rules", `@${stagedAssets.rulesFilePath}`);

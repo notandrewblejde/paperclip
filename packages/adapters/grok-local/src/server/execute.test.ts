@@ -71,10 +71,11 @@ describe("grok_local execute", () => {
           "--output-format",
           "streaming-json",
           "--always-approve",
-          "--permission-mode",
-          "dontAsk",
         ]),
       );
+      // The default (auto-approve) posture must NOT emit --permission-mode dontAsk:
+      // dontAsk wins over --always-approve and denies run_terminal_command, aborting the run.
+      expect(args).not.toContain("--permission-mode");
       expect(await fs.readFile(path.join(root, "Agents.md"), "utf8")).toContain("You are Grok.");
       expect(await pathExists(path.join(root, ".claude", "skills", "paperclip", "SKILL.md"))).toBe(true);
       await options.onLog?.("stdout", '{"type":"text","data":"done"}\n');
@@ -248,5 +249,74 @@ describe("grok_local execute", () => {
     expect(runProcessMock).not.toHaveBeenCalled();
     expect(await pathExists(path.join(root, "Agents.md"))).toBe(false);
     expect(await pathExists(path.join(root, ".claude", "skills", "paperclip"))).toBe(false);
+  });
+
+  describe("permission-mode / always-approve flag conflict (SPC-30987)", () => {
+    async function captureArgs(adapterConfig: Record<string, unknown>): Promise<string[]> {
+      const root = await makeTempRoot();
+      let capturedArgs: string[] = [];
+      runProcessMock.mockImplementation(async (_runId, _target, _command, args) => {
+        capturedArgs = args;
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: [
+            JSON.stringify({ type: "text", data: "done" }),
+            JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "sess-1", requestId: "req-1" }),
+          ].join("\n"),
+          stderr: "",
+        };
+      });
+
+      const ctx: AdapterExecutionContext = {
+        runId: "run-flags",
+        agent: {
+          id: "agent-1",
+          companyId: "company-1",
+          name: "Grok Agent",
+          adapterType: "grok_local",
+          adapterConfig,
+        },
+        runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+        config: { cwd: root, ...adapterConfig },
+        context: {},
+        authToken: "run-token",
+        onLog: async () => {},
+      };
+
+      await execute(ctx);
+      expect(runProcessMock).toHaveBeenCalled();
+      return capturedArgs;
+    }
+
+    it("does not emit the conflicting --permission-mode dontAsk under the default auto-approve posture", async () => {
+      const args = await captureArgs({});
+      expect(args).toContain("--always-approve");
+      // dontAsk + --always-approve aborts every run on the first shell tool call.
+      expect(args).not.toContain("--permission-mode");
+    });
+
+    it("also suppresses dontAsk when it is set explicitly alongside auto-approve", async () => {
+      const args = await captureArgs({ permissionMode: "dontAsk", alwaysApprove: true });
+      expect(args).toContain("--always-approve");
+      expect(args).not.toContain("--permission-mode");
+    });
+
+    it("preserves an explicit non-conflicting permissionMode override", async () => {
+      const args = await captureArgs({ permissionMode: "bypassPermissions" });
+      expect(args).toContain("--always-approve");
+      const idx = args.indexOf("--permission-mode");
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(args[idx + 1]).toBe("bypassPermissions");
+    });
+
+    it("still emits dontAsk when auto-approve is disabled (no conflict)", async () => {
+      const args = await captureArgs({ permissionMode: "dontAsk", alwaysApprove: false });
+      expect(args).not.toContain("--always-approve");
+      const idx = args.indexOf("--permission-mode");
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(args[idx + 1]).toBe("dontAsk");
+    });
   });
 });
