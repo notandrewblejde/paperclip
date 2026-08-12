@@ -10,6 +10,7 @@ Container images for running coding-agent harnesses in sandboxed environments (f
 - **`agent-runtime-codex`**: Extends base with `@openai/codex`.
 - **`agent-runtime-gemini`**: Extends base with `@google/gemini-cli` plus headless auth-mode settings.
 - **`agent-runtime-claude`**: Extends base with `@anthropic-ai/claude-code` (symlinked as `claude-code`).
+- **`agent-runtime-grok`**: Extends base with `@xai-official/grok` (xAI Grok Build CLI; the `grok_local` adapter runs `grok --single --output-format streaming-json`). Auth is a per-run `XAI_API_KEY` env var — no baked secret, no host login.
 - **`agent-runtime-acpx`** / **`agent-runtime-hermes`**: Dockerfiles included in the bake group, not in the default publish scope (hermes is a stub until a CLI package exists).
 
 ## Base Image Contents
