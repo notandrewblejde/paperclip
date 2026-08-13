@@ -73,8 +73,10 @@ describe("grok_local execute", () => {
           "--always-approve",
           "--permission-mode",
           "dontAsk",
+          "--no-plan",
         ]),
       );
+      expect(args).not.toContain("plan");
       expect(await fs.readFile(path.join(root, "Agents.md"), "utf8")).toContain("You are Grok.");
       expect(await pathExists(path.join(root, ".claude", "skills", "paperclip", "SKILL.md"))).toBe(true);
       await options.onLog?.("stdout", '{"type":"text","data":"done"}\n');
@@ -183,5 +185,54 @@ describe("grok_local execute", () => {
     expect(runProcessMock).not.toHaveBeenCalled();
     expect(await pathExists(path.join(root, "Agents.md"))).toBe(false);
     expect(await pathExists(path.join(root, ".claude", "skills", "paperclip"))).toBe(false);
+  });
+
+  it("remaps permissionMode=plan and still launches with --no-plan so the run can execute", async () => {
+    const root = await makeTempRoot();
+    runProcessMock.mockImplementation(async (_runId, _target, _command, args) => {
+      expect(args).toEqual(expect.arrayContaining(["--permission-mode", "dontAsk", "--no-plan"]));
+      expect(args).not.toContain("plan");
+      return {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: [
+          JSON.stringify({ type: "text", data: "executed" }),
+          JSON.stringify({ type: "end", stopReason: "EndTurn", sessionId: "sess-plan", requestId: "req-plan" }),
+        ].join("\n"),
+        stderr: "",
+      };
+    });
+
+    const result = await execute({
+      runId: "run-plan-remap",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "Grok Agent",
+        adapterType: "grok_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        cwd: root,
+        permissionMode: "plan",
+      },
+      context: {},
+      authToken: "run-token",
+      onLog: async () => {},
+    });
+
+    expect(result).toMatchObject({
+      exitCode: 0,
+      errorMessage: null,
+      sessionId: "sess-plan",
+    });
+    expect(runProcessMock).toHaveBeenCalledOnce();
   });
 });

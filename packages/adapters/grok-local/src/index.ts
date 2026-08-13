@@ -26,7 +26,8 @@ Core fields:
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file. Paperclip stages it into the execution workspace as \`Agents.md\` when safe, otherwise falls back to \`--rules @file\`
 - promptTemplate (string, optional): run prompt template
 - model (string, optional): Grok model id. Defaults to grok-build.
-- permissionMode (string, optional): Grok permission mode. Defaults to \`dontAsk\`
+- permissionMode (string, optional): Grok permission mode. Defaults to \`dontAsk\`. \`plan\` is remapped to \`dontAsk\` so unattended heartbeats can execute tools and PATCH a Paperclip disposition
+- disablePlanMode (boolean, optional): defaults to true. Passes \`--no-plan\` so Grok does not stay in CLI plan mode and die after narrating a plan
 - reasoningEffort (string, optional): Grok reasoning effort passed via \`--reasoning-effort\`
 - maxTurns (number, optional): maximum agent turns for the run
 - command (string, optional): defaults to "grok"
@@ -39,6 +40,7 @@ Operational fields:
 
 Notes:
 - Runs use \`grok --single\` with \`--output-format streaming-json\`.
+- Heartbeats also pass \`--always-approve\` and \`--no-plan\` by default. \`fallbackFetchNeeded:false\` is a Paperclip wake-payload field ("do not refetch the issue thread"), not a Grok execute/fallback switch.
 - Sessions resume with \`--resume <sessionId>\` when the saved session cwd matches the current cwd.
 - Paperclip stages desired runtime skills into \`.claude/skills\` inside the execution workspace so Grok discovers them as project skills.
 - Use \`grok models\` to inspect authentication and available models on the host.

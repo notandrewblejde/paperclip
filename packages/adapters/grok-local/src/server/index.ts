@@ -64,3 +64,9 @@ export { execute } from "./execute.js";
 export { listGrokSkills, syncGrokSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export { parseGrokJsonl, isGrokUnknownSessionError } from "./parse.js";
+export {
+  GROK_DEFAULT_PERMISSION_MODE,
+  GROK_NO_PLAN_FLAG,
+  buildGrokUnattendedFlags,
+  resolveGrokPermissionMode,
+} from "./cli-flags.js";

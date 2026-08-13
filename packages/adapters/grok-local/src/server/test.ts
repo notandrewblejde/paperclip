@@ -18,6 +18,7 @@ import {
   runAdapterExecutionTargetProcess,
 } from "@paperclipai/adapter-utils/execution-target";
 import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
+import { buildGrokUnattendedFlags } from "./cli-flags.js";
 import { parseGrokJsonl } from "./parse.js";
 
 export interface GrokModelsProbe {
@@ -244,10 +245,7 @@ export async function testEnvironment(
     const probeArgs = [
       "--output-format",
       "streaming-json",
-      "--always-approve",
-      "--permission-mode",
-      "dontAsk",
-      "--disable-web-search",
+      ...buildGrokUnattendedFlags({}).flags,
     ];
     if (configuredModel && configuredModel !== DEFAULT_GROK_LOCAL_MODEL) {
       probeArgs.push("--model", configuredModel);
