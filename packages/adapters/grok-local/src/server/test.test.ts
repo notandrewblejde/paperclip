@@ -98,6 +98,7 @@ describe("grok_local testEnvironment", () => {
         "--permission-mode",
         "dontAsk",
         "--disable-web-search",
+        "--no-plan",
         "--single",
         "Respond with exactly hello.",
       ]),

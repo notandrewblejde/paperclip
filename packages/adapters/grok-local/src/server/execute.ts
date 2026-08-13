@@ -39,6 +39,7 @@ import {
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
 } from "@paperclipai/adapter-utils/server-utils";
 import { DEFAULT_GROK_LOCAL_MODEL } from "../index.js";
+import { buildGrokUnattendedFlags } from "./cli-flags.js";
 import { isGrokUnknownSessionError, parseGrokJsonl } from "./parse.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -202,11 +203,23 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const command = asString(config.command, "grok");
   const model = asString(config.model, DEFAULT_GROK_LOCAL_MODEL).trim();
-  const permissionMode = asString(config.permissionMode, "dontAsk").trim() || "dontAsk";
   const reasoningEffort = asString(config.reasoningEffort, "").trim();
   const maxTurns = asNumber(config.maxTurns, 0);
   const alwaysApprove = asBoolean(config.alwaysApprove, true);
   const disableWebSearch = asBoolean(config.disableWebSearch, true);
+  const extraArgs = (() => {
+    const fromExtraArgs = asStringArray(config.extraArgs);
+    if (fromExtraArgs.length > 0) return fromExtraArgs;
+    return asStringArray(config.args);
+  })();
+  const unattendedFlags = buildGrokUnattendedFlags({
+    permissionMode: asString(config.permissionMode, ""),
+    alwaysApprove,
+    disableWebSearch,
+    disablePlanMode: asBoolean(config.disablePlanMode, true),
+    extraArgs,
+  });
+  const permissionMode = unattendedFlags.permissionMode;
 
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const workspaceCwd = asString(workspaceContext.cwd, "");
@@ -389,6 +402,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const commandNotes = (() => {
       const notes: string[] = ["Prompt is passed to Grok via --single in headless mode."];
       if (alwaysApprove) notes.push("Added --always-approve for unattended execution.");
+      if (unattendedFlags.disablePlanMode) {
+        notes.push("Added --no-plan so Grok heartbeats execute tools instead of staying in plan mode.");
+      }
+      if (unattendedFlags.remappedFromPlan) {
+        notes.push(`Remapped permissionMode=plan to ${permissionMode}; plan mode cannot PATCH a Paperclip disposition.`);
+      }
       if (stagedAssets.stagedInstructionsPath) {
         notes.push(`Staged project instructions at ${stagedAssets.stagedInstructionsPath} for native Grok discovery.`);
       }
@@ -437,15 +456,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       if (model && model !== DEFAULT_GROK_LOCAL_MODEL) args.push("--model", model);
       if (reasoningEffort) args.push("--reasoning-effort", reasoningEffort);
       if (maxTurns > 0) args.push("--max-turns", String(maxTurns));
-      if (permissionMode) args.push("--permission-mode", permissionMode);
-      if (alwaysApprove) args.push("--always-approve");
-      if (disableWebSearch) args.push("--disable-web-search");
+      args.push(...unattendedFlags.flags);
       if (stagedAssets.rulesFilePath) args.push("--rules", `@${stagedAssets.rulesFilePath}`);
-      const extraArgs = (() => {
-        const fromExtraArgs = asStringArray(config.extraArgs);
-        if (fromExtraArgs.length > 0) return fromExtraArgs;
-        return asStringArray(config.args);
-      })();
       if (extraArgs.length > 0) args.push(...extraArgs);
       args.push("--single", prompt);
       return args;
