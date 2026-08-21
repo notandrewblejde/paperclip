@@ -492,6 +492,122 @@ describe("issue graph liveness classifier", () => {
     }
   });
 
+  it("flags a blocked issue with zero blocker edges and no waiting path (SPC-30159 dangler)", () => {
+    const danglerId = "dangler-1";
+    const findings = classifyIssueGraphLiveness({
+      issues: [
+        issue({
+          id: danglerId,
+          identifier: "SPC-30123",
+          title: "Deploy-verify left blocked on external CI with no blockers",
+          status: "blocked",
+        }),
+      ],
+      relations: [],
+      agents: [agent(), manager],
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      issueId: danglerId,
+      state: "blocked_without_blockers",
+      recoveryIssueId: danglerId,
+      recommendedOwnerAgentId: coderId,
+      incidentKey: `harness_liveness:${companyId}:${danglerId}:blocked_without_blockers:none`,
+    });
+    expect(findings[0]?.recommendedOwnerCandidates[0]).toMatchObject({
+      agentId: coderId,
+      reason: "stalled_blocker_assignee",
+    });
+  });
+
+  it("flags a blocked-without-blockers issue even when it is itself a blocker of another issue", () => {
+    // SPC-30123/SPC-30117 shape: the dangler blocks a dependent, so the old
+    // unresolvedBlockers skip would have hidden it, and the dependent's chain
+    // walk ends at an invokable assignee without reporting anything.
+    const danglerId = "dangler-1";
+    const dependentId = "dependent-1";
+    const findings = classifyIssueGraphLiveness({
+      issues: [
+        issue({
+          id: danglerId,
+          identifier: "SPC-30123",
+          title: "Deploy-verify left blocked on external CI with no blockers",
+          status: "blocked",
+        }),
+        issue({
+          id: dependentId,
+          identifier: "SPC-30117",
+          title: "Dependent rollout issue",
+          status: "blocked",
+        }),
+      ],
+      relations: [{ companyId, blockerIssueId: danglerId, blockedIssueId: dependentId }],
+      agents: [agent(), manager],
+    });
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      issueId: danglerId,
+      state: "blocked_without_blockers",
+    });
+  });
+
+  it("does not flag blocked-without-blockers issues that still have an explicit waiting path", () => {
+    const danglerId = "dangler-1";
+    const base = issue({
+      id: danglerId,
+      identifier: "SPC-30123",
+      status: "blocked",
+    });
+    const future = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+
+    const cases = [
+      { name: "user owner", issue: { ...base, assigneeAgentId: null, assigneeUserId: "board-user-1" } },
+      { name: "scheduled monitor", issue: { ...base, monitorNextCheckAt: future } },
+      {
+        name: "active run",
+        issue: base,
+        activeRuns: [{ companyId, issueId: danglerId, agentId: coderId, status: "running" }],
+      },
+      {
+        name: "queued wake",
+        issue: base,
+        queuedWakeRequests: [{ companyId, issueId: danglerId, agentId: coderId, status: "queued" }],
+      },
+      {
+        name: "pending interaction",
+        issue: base,
+        pendingInteractions: [{ companyId, issueId: danglerId, status: "pending" }],
+      },
+      {
+        name: "pending approval",
+        issue: base,
+        pendingApprovals: [{ companyId, issueId: danglerId, status: "pending" }],
+      },
+      {
+        name: "open recovery issue",
+        issue: base,
+        openRecoveryIssues: [{ companyId, issueId: danglerId, status: "todo" }],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const findings = classifyIssueGraphLiveness({
+        issues: [testCase.issue],
+        relations: [],
+        agents: [agent(), manager],
+        activeRuns: testCase.activeRuns,
+        queuedWakeRequests: testCase.queuedWakeRequests,
+        pendingInteractions: testCase.pendingInteractions,
+        pendingApprovals: testCase.pendingApprovals,
+        openRecoveryIssues: testCase.openRecoveryIssues,
+      });
+
+      expect(findings, testCase.name).toEqual([]);
+    }
+  });
+
   it("ignores cross-company waiting paths for stalled in_review issues", () => {
     const reviewIssueId = "review-1";
 

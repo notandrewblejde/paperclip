@@ -42,6 +42,7 @@ export const issueBlockedInboxStateSchema = z.enum([
 export const issueBlockedInboxSeveritySchema = z.enum(["critical", "high", "medium", "low"]);
 
 export const issueBlockedInboxReasonSchema = z.enum([
+  "blocked_without_blockers",
   "blocked_by_unassigned_issue",
   "blocked_by_assigned_backlog_issue",
   "blocked_by_uninvokable_assignee",
