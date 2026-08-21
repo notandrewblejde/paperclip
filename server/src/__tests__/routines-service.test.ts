@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -1915,5 +1915,88 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     expect(runs[0]?.linkedIssueId).toBeTruthy();
     const createdIssues = await db.select().from(issues).where(eq(issues.companyId, companyId));
     expect(createdIssues).toHaveLength(1);
+  });
+
+  // SPC-29477: a repeated stall (paused/non-invokable assignee, or any dispatch failure)
+  // on the automated path must PUSH a board-visible alert — not just pile up
+  // skipped/failed runs that nobody watches. A go-live gate went dark for 26 days
+  // because 16 consecutive stalled fires surfaced zero signal.
+  it("emits a single board-visible alert after N consecutive stalled scheduled runs, deduped", async () => {
+    const { agentId, companyId, routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(
+      routine.id,
+      { kind: "schedule", label: "daily", cronExpression: "0 0 * * *", timezone: "UTC" },
+      {},
+    );
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+
+    const pastDue = new Date("2020-01-01T00:00:00.000Z");
+    const fireOnce = async () => {
+      await db.update(routineTriggers).set({ nextRunAt: pastDue }).where(eq(routineTriggers.id, trigger.id));
+      await svc.tickScheduledTriggers(new Date());
+    };
+    const listAlerts = async () =>
+      db
+        .select()
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "routine_failure_alert")));
+
+    // Below threshold (2 stalled runs): no alert yet.
+    await fireOnce();
+    await fireOnce();
+    expect(await listAlerts()).toHaveLength(0);
+
+    // Third consecutive stall trips the threshold: exactly one board-visible alert,
+    // deliberately UNASSIGNED (assigning to the paused assignee would re-black-hole it).
+    await fireOnce();
+    const alerts = await listAlerts();
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.originId).toBe(routine.id);
+    expect(alerts[0]?.assigneeAgentId).toBeNull();
+    expect(alerts[0]?.priority).toBe("high");
+    expect(alerts[0]?.status).toBe("todo");
+
+    // Dedup: a fourth consecutive stall does not spawn a second open alert.
+    await fireOnce();
+    expect(await listAlerts()).toHaveLength(1);
+
+    // The alert is recorded in the activity trail for audit.
+    const alertActivity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "routine.consecutive_failures_alerted"));
+    expect(alertActivity.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not alert when stalled runs are broken up by a successful dispatch", async () => {
+    const { agentId, companyId, routine, svc } = await seedFixture();
+    const { trigger } = await svc.createTrigger(
+      routine.id,
+      { kind: "schedule", label: "daily", cronExpression: "0 0 * * *", timezone: "UTC" },
+      {},
+    );
+
+    const pastDue = new Date("2020-01-01T00:00:00.000Z");
+    const fireOnce = async () => {
+      await db.update(routineTriggers).set({ nextRunAt: pastDue }).where(eq(routineTriggers.id, trigger.id));
+      await svc.tickScheduledTriggers(new Date());
+    };
+
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+    await fireOnce();
+    await fireOnce();
+    // Assignee recovers and a dispatch succeeds, resetting the streak.
+    await db.update(agents).set({ status: "active" }).where(eq(agents.id, agentId));
+    await fireOnce();
+    // Paused again for two more stalls — streak restarts from the successful run.
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+    await fireOnce();
+    await fireOnce();
+
+    const alerts = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "routine_failure_alert")));
+    expect(alerts).toHaveLength(0);
   });
 });
