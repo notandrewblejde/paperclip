@@ -204,6 +204,27 @@ export function isClaudeRefusalResult(parsed: Record<string, unknown> | null | u
   return structuredStopReasons.some((reason) => reason === "refusal");
 }
 
+/**
+ * A genuine terminal success from the Claude CLI: the final `result` event
+ * reports `subtype=success` and does not set the `is_error` flag. Detecting this
+ * from the structured result — rather than the process exit code — lets the
+ * caller distinguish a run that actually completed from one where the CLI
+ * process exited non-zero *after* emitting a success result (e.g. a shutdown /
+ * signal race on teardown). Without this guard such runs are misreported as
+ * `Claude run failed: subtype=success: ...` and flip the agent to `error`
+ * despite the work having completed. See SPC-29208 (same family as SPC-21314).
+ */
+export function isClaudeSuccessResult(parsed: Record<string, unknown> | null | undefined): boolean {
+  if (!parsed) return false;
+
+  const subtype = asString(parsed.subtype, "").trim().toLowerCase();
+  if (subtype !== "success") return false;
+
+  // A real success never carries the error flag; if it somehow does, defer to
+  // the normal failure path rather than swallowing a genuine error.
+  return parsed.is_error !== true;
+}
+
 export function isClaudeUnknownSessionError(parsed: Record<string, unknown>): boolean {
   const resultText = asString(parsed.result, "").trim();
   const allMessages = [resultText, ...extractClaudeErrorMessages(parsed)]
