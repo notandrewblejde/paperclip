@@ -7,6 +7,7 @@ import {
   isClaudeRefusalResult,
   isClaudeUnknownSessionError,
   isClaudeImageProcessingError,
+  isClaudeSuccessResult,
   parseClaudeStreamJson,
 } from "./parse.js";
 
@@ -362,5 +363,29 @@ describe("extractClaudeRetryNotBefore", () => {
     expect(
       extractClaudeRetryNotBefore({ errorMessage: "Overloaded. Try again later." }, new Date()),
     ).toBeNull();
+  });
+});
+
+describe("isClaudeSuccessResult", () => {
+  it("treats a subtype=success, is_error=false result as authoritative success", () => {
+    expect(
+      isClaudeSuccessResult({ type: "result", subtype: "success", is_error: false, result: "Heartbeat complete." }),
+    ).toBe(true);
+  });
+
+  it("is case-insensitive and tolerant of surrounding whitespace", () => {
+    expect(isClaudeSuccessResult({ subtype: " Success " })).toBe(true);
+  });
+
+  it("returns false when is_error is true even with subtype=success", () => {
+    expect(isClaudeSuccessResult({ subtype: "success", is_error: true })).toBe(false);
+  });
+
+  it("returns false for error subtypes and missing results", () => {
+    expect(isClaudeSuccessResult({ subtype: "error_max_turns" })).toBe(false);
+    expect(isClaudeSuccessResult({ subtype: "error_during_execution" })).toBe(false);
+    expect(isClaudeSuccessResult({})).toBe(false);
+    expect(isClaudeSuccessResult(null)).toBe(false);
+    expect(isClaudeSuccessResult(undefined)).toBe(false);
   });
 });

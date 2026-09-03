@@ -2,6 +2,7 @@ import type { UsageSummary } from "@paperclipai/adapter-utils";
 import {
   asString,
   asNumber,
+  asBoolean,
   parseObject,
   parseJson,
 } from "@paperclipai/adapter-utils/server-utils";
@@ -147,6 +148,12 @@ export function detectClaudeLoginRequired(input: {
     requiresLogin,
     loginUrl: extractClaudeLoginUrl([input.stdout, input.stderr].join("\n")),
   };
+}
+
+export function isClaudeSuccessResult(parsed: Record<string, unknown> | null | undefined): boolean {
+  if (!parsed) return false;
+  if (asBoolean(parsed.is_error, false)) return false;
+  return asString(parsed.subtype, "").trim().toLowerCase() === "success";
 }
 
 export function describeClaudeFailure(parsed: Record<string, unknown>): string | null {

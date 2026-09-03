@@ -51,6 +51,7 @@ import {
   extractClaudeRetryNotBefore,
   isClaudeMaxTurnsResult,
   isClaudeRefusalResult,
+  isClaudeSuccessResult,
   isClaudeTransientUpstreamError,
   isClaudeUnknownSessionError,
   isClaudePoisonedPreviousMessageIdError,
@@ -907,7 +908,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // successful run to Paperclip and the heartbeat stalls silently. See RY-604.
     const claudeRefusal = isClaudeRefusalResult(parsed);
     const parsedIsError = asBoolean(parsed.is_error, false);
-    const failed = (proc.exitCode ?? 0) !== 0 || parsedIsError;
+    // A parsed terminal result with subtype=success and is_error=false is
+    // authoritative. After emitting it, the CLI can still be draining
+    // background tasks / MCP teardown; the terminal-result cleanup then
+    // SIGTERMs it and the process exits non-zero even though the run
+    // succeeded. Classifying those exits as failures feeds terminal-run
+    // recovery a phantom `adapter_failed` and strands healthy issues on the
+    // recovery owner. See SPC-37095.
+    const claudeReportedSuccess = isClaudeSuccessResult(parsed);
+    const failed = parsedIsError || ((proc.exitCode ?? 0) !== 0 && !claudeReportedSuccess);
     // Validate-before-persist guard: never persist a sessionId whose transcript
     // is known-poisoned. The Claude CLI keeps an on-disk JSONL keyed by the
     // session id; if the last entry contains a non-`msg_`-prefixed
@@ -973,10 +982,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ...(transientUpstream ? { errorFamily: "transient_upstream" } : {}),
       ...(transientRetryNotBefore ? { retryNotBefore: transientRetryNotBefore.toISOString() } : {}),
       ...(transientRetryNotBefore ? { transientRetryNotBefore: transientRetryNotBefore.toISOString() } : {}),
+      // Keep the raw teardown exit info for forensics: when the run succeeded
+      // we normalize `exitCode` to 0 below (the server re-derives outcome from
+      // exitCode independently of `errorMessage`), which would otherwise hide
+      // that the process was reaped non-zero.
+      ...(claudeReportedSuccess && ((proc.exitCode ?? 0) !== 0 || proc.signal)
+        ? { processExitCode: proc.exitCode, processSignal: proc.signal }
+        : {}),
     };
 
     return {
-      exitCode: proc.exitCode,
+      exitCode: claudeReportedSuccess && !parsedIsError ? 0 : proc.exitCode,
       signal: proc.signal,
       timedOut: false,
       errorMessage,
