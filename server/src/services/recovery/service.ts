@@ -2796,6 +2796,26 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         continue;
       }
 
+      // SPC-39088: an armed `executionPolicy.monitor.nextCheckAt` (persisted
+      // on the issue as `monitorNextCheckAt`) is an explicit "don't wake me
+      // before this time" contract set by the assignee. A dedicated
+      // monitor-tick path already dispatches the owner once it comes due.
+      // Upstream paperclipai/paperclip fixed this same gap for
+      // `reconcileStrandedAssignedIssues` via `hasPersistedDurableWaitPath`
+      // (PR #9373, "Enforce durable external-wait liveness") — this repo's
+      // `master` predates that merge and never picked it up, so a plain
+      // armed monitor here still reads as an abandoned issue. Without this
+      // guard, stranded-work recovery re-enqueues `issue_continuation_needed`
+      // on every reconciliation tick regardless of how far out the monitor
+      // is armed, because a comment posted to satisfy `commentRequired`
+      // reads as fresh productive progress and re-arms the very next
+      // immediate retry (observed: 10+ rewakes in ~20 minutes against a
+      // monitor armed 9 days out).
+      if (issue.monitorNextCheckAt && issue.monitorNextCheckAt.getTime() > Date.now()) {
+        result.skipped += 1;
+        continue;
+      }
+
       const latestRun = await getLatestIssueRun(issue.companyId, issue.id);
       if (isStrandedIssueRecoveryIssue(issue) && isUnsuccessfulTerminalIssueRun(latestRun)) {
         const updated = await escalateStrandedRecoveryIssueInPlace({
