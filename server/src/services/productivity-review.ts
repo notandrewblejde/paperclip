@@ -789,6 +789,7 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
       snoozed: 0,
       creationCapped: 0,
       skipped: 0,
+      assigneeNotRunnable: 0,
       failed: 0,
       reviewIssueIds: [] as string[],
       failedIssueIds: [] as string[],
@@ -811,6 +812,10 @@ export function productivityReviewService(db: Db, deps?: { enqueueWakeup?: Enque
       const sourceAgent = await getAgent(candidate.assigneeAgentId);
       if (!sourceAgent || sourceAgent.companyId !== candidate.companyId) {
         result.skipped += 1;
+        continue;
+      }
+      if (!isAgentInvokable(sourceAgent)) {
+        result.assigneeNotRunnable += 1;
         continue;
       }
       const evidence = await collectEvidence(candidate, sourceAgent, thresholds, now);

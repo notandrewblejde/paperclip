@@ -55,6 +55,7 @@ describeEmbeddedPostgres("productivity review service", () => {
     startedAt?: Date;
     parentId?: string | null;
     originKind?: string;
+    assigneeStatus?: string;
   }) {
     const companyId = randomUUID();
     const managerId = randomUUID();
@@ -86,7 +87,7 @@ describeEmbeddedPostgres("productivity review service", () => {
         companyId,
         name: "Coder",
         role: "engineer",
-        status: "idle",
+        status: opts?.assigneeStatus ?? "idle",
         reportsTo: managerId,
         adapterType: "codex_local",
         adapterConfig: {},
@@ -358,6 +359,24 @@ describeEmbeddedPostgres("productivity review service", () => {
     expect(review?.description).toContain("Primary trigger: `long_active_duration`");
     expect(review?.priority).toBe("medium");
     expect(hold.held).toBe(false);
+  });
+
+  it("skips candidates whose assignee is paused instead of spawning a review nobody can act on", async () => {
+    const now = new Date("2026-04-28T12:00:00.000Z");
+    const seeded = await seedAssignedIssue({
+      status: "in_progress",
+      startedAt: new Date(now.getTime() - 7 * 60 * 60 * 1000),
+      assigneeStatus: "paused",
+    });
+
+    const result = await productivityReviewService(db).reconcileProductivityReviews({
+      now,
+      companyId: seeded.companyId,
+    });
+
+    expect(result.created).toBe(0);
+    expect(result.assigneeNotRunnable).toBe(1);
+    expect(await listProductivityReviews(seeded.companyId)).toHaveLength(0);
   });
 
   it("creates a high-churn review even when every sampled run has a progress comment", async () => {
