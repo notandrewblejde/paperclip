@@ -46,6 +46,25 @@ describe("redactSecretsInText", () => {
     expect(redactSecretsInText(escaped)).not.toContain("9e00112233445566778899aabbccdd0a");
   });
 
+  it("keeps structured JSON parseable after redaction", () => {
+    const json = JSON.stringify({
+      K3_API_KEY: "sk-k3-AbCdEf0123456789xyz",
+      DATABASE_URL: "postgres://paperclip:s3cr3tExamplePasswordValue32c@host.example:5432/db",
+      other: "kept",
+    });
+    const out = redactSecretsInText(json);
+    expect(out).not.toContain("sk-k3-AbCdEf0123456789xyz");
+    expect(out).not.toContain("s3cr3tExamplePasswordValue32c");
+    const parsed = JSON.parse(out);
+    expect(parsed.K3_API_KEY).toBe("<K3_API_KEY_REDACTED>");
+    expect(parsed.other).toBe("kept");
+
+    const ndjson = JSON.stringify({ text: JSON.stringify({ PJM_API_KEY: "9e00112233445566778899aabbccdd0a" }) });
+    const ndjsonOut = redactSecretsInText(ndjson);
+    expect(ndjsonOut).not.toContain("9e00112233445566778899aabbccdd0a");
+    expect(JSON.parse(JSON.parse(ndjsonOut).text).PJM_API_KEY).toBe("<PJM_API_KEY_REDACTED>");
+  });
+
   it("redacts Anthropic and GitHub App token prefixes without a name anchor", () => {
     const anthropic = "token=sk-ant-api03-AbCdEf0123456789_-ghIJKlmnop";
     expect(redactSecretsInText(anthropic)).not.toContain("sk-ant-api03-AbCdEf");

@@ -59,12 +59,14 @@ const ENV_DUMP_VALUE_CHARSET = String.raw`[A-Za-z0-9/+=._\-:@?&%~]{4,}`;
 // Matches `NAME=value`, `NAME: value`, JSON `"NAME":"value"`, and the
 // NDJSON-escaped `\"NAME\": \"value\"` form. Optional backslash + quote
 // wrappers must be `\\?` (optional `\`), not `\?` (optional `?`) — the
-// latter never matches a bare `NAME=...` env dump.
+// latter never matches a bare `NAME=...` env dump. Only the value is
+// replaced; the captured name, quotes, and separator are preserved so
+// structured JSON output stays parseable.
 const ENV_DUMP_PATTERNS: Array<{ re: RegExp; name: string }> = ENV_DUMP_SECRET_NAMES.map(
   (name) => ({
     name,
     re: new RegExp(
-      name + String.raw`\\?["']?\s*[=:]\s*\\?["']?` + ENV_DUMP_VALUE_CHARSET + String.raw`\\?["']?`,
+      "(" + name + String.raw`\\?["']?\s*[=:]\s*\\?["']?)` + ENV_DUMP_VALUE_CHARSET,
       "gi",
     ),
   }),
@@ -82,7 +84,7 @@ function redactSecrets(text: string): string {
   out = out.replace(ANTHROPIC_KEY_RE, "<ANTHROPIC_API_KEY_REDACTED>");
   out = out.replace(GITHUB_APP_TOKEN_RE, "<GITHUB_APP_TOKEN_REDACTED>");
   for (const { re, name } of ENV_DUMP_PATTERNS) {
-    out = out.replace(re, `${name}=<${name}_REDACTED>`);
+    out = out.replace(re, (_m, prefix: string) => `${prefix}<${name}_REDACTED>`);
   }
   return out;
 }
